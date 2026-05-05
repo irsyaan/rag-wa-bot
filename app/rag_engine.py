@@ -361,7 +361,10 @@ class RagEngine:
 
     def generate_greeting(self, text: str, sender_name: str = "User") -> str:
         """Generate a time-aware greeting response using the fast model."""
-        current_time = datetime.now().strftime("%H:%M")
+        now = datetime.now()
+        current_time = now.strftime("%H:%M")
+        hour = now.hour
+        
         prompt = GREETING_SYSTEM_PROMPT.format(
             current_time=current_time,
             text=text,
@@ -378,10 +381,23 @@ class RagEngine:
                 timeout=30,
             )
             message = data.get("message", {}).get("content", "").strip()
-            return message if message else "Hello! How can I help you?"
+            return message if message else self._fallback_greeting(sender_name, hour)
         except Exception as e:
-            logger.error(f"Failed to generate greeting: {e}")
-            return "Hello! How can I help you?"
+            logger.warning(f"LLM greeting failed, using fallback: {e}")
+            return self._fallback_greeting(sender_name, hour)
+
+    def _fallback_greeting(self, sender_name: str, hour: int) -> str:
+        """Build a greeting from Python without needing the LLM."""
+        name = sender_name or "there"
+        if 5 <= hour < 12:
+            period = "Good morning"
+        elif 12 <= hour < 17:
+            period = "Good afternoon"
+        elif 17 <= hour < 21:
+            period = "Good evening"
+        else:
+            period = "Good evening"
+        return f"{period}, {name}! How can I help you?"
 
     def answer(self, question: str, sender_number: str, chat_jid: str, role: str = "user") -> RagResult:
         """Main RAG answer function."""
