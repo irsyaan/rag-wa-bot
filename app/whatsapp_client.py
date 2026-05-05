@@ -1,12 +1,15 @@
 """
-WhatsApp client using neonize.
+WhatsApp client using neonize..
 
 Handles connection, message receiving, QR code display,
 and sending replies. Session is persisted to avoid re-scanning QR.
 """
 
+from pathlib import Path
 from typing import Callable, Optional
+import sqlite3
 
+import segno
 from loguru import logger
 
 from neonize.client import NewClient
@@ -40,30 +43,123 @@ class WhatsAppClient:
         self.client.event(PairStatusEv)(self._on_pair_status)
         self.client.event(MessageEv)(self._on_message)
 
+        # Save QR as image instead of relying only on terminal QR.
+        # Terminal QR can wrap/crop and become unscannable.
+        self.client.qr(self._on_qr)
+
     def set_message_handler(self, handler: Callable) -> None:
         """Set the callback for incoming messages."""
         self._message_handler = handler
 
+    def _jid_to_str(self, jid_obj) -> str:
+        """Convert Neonize/WhatsApp JID object into clean user@server string."""
+        try:
+            jid = JIDToNonAD(jid_obj)
+            user = getattr(jid, "User", "")
+            server = getattr(jid, "Server", "")
+
+            if user and server:
+                return f"{user}@{server}"
+
+            return str(jid)
+        except Exception:
+            return str(jid_obj)
+
+    def _resolve_phone_number(self, jid: str) -> str:
+        """
+        Resolve WhatsApp LID to real phone number using Neonize/Whatsmeow SQLite session.
+
+        Example:
+        22982370033670@lid -> 6287877904270
+        6287877904270@s.whatsapp.net -> 6287877904270
+        """
+        if not jid:
+            return ""
+
+        user_part = jid.split("@")[0]
+
+        # Normal phone-number JID
+        if jid.endswith("@s.whatsapp.net"):
+            return user_part
+
+        # LID JID, try SQLite lid map
+        if jid.endswith("@lid"):
+            try:
+                conn = sqlite3.connect(settings.neonize_session_path)
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1",
+                    (user_part,),
+                )
+                row = cur.fetchone()
+                conn.close()
+
+                if row and row[0]:
+                    logger.debug(f"Resolved LID {user_part} to phone number {row[0]}")
+                    return str(row[0])
+
+            except Exception as e:
+                logger.warning(f"Could not resolve LID {user_part}: {e}")
+
+            # Fallback if no mapping exists
+            return user_part
+
+        # Fallback for groups or unknown formats
+        return user_part
+
     def _on_connected(self, client: NewClient, event: ConnectedEv):
         """Called when the client connects to WhatsApp."""
-        self.bot_jid = str(JIDToNonAD(client.get_me().JID))
+        self.bot_jid = self._jid_to_str(client.get_me().JID)
         logger.info(f"WhatsApp connected! Bot JID: {self.bot_jid}")
 
     def _on_pair_status(self, client: NewClient, event: PairStatusEv):
         """Called during QR pairing."""
         logger.info(f"Pairing status: {event}")
 
+    def _on_qr(self, client: NewClient, qr_data: bytes):
+        """Save WhatsApp QR code as PNG for easier scanning."""
+        try:
+            qr_path = Path(settings.rag_log_dir) / "whatsapp_qr.png"
+            qr_path.parent.mkdir(parents=True, exist_ok=True)
+
+            segno.make_qr(qr_data).save(str(qr_path), scale=12, border=4)
+
+            logger.info("=" * 60)
+            logger.info("New WhatsApp QR generated.")
+            logger.info(f"QR image saved to: {qr_path}")
+            logger.info("Download/open this PNG and scan it from WhatsApp Linked Devices.")
+            logger.info("=" * 60)
+        except Exception as e:
+            logger.error(f"Failed to save QR image: {e}")
+
     def _on_message(self, client: NewClient, event: MessageEv):
         """Handle incoming messages."""
-        msg = event.Message
+        # In this neonize version, event itself is the full Neonize_pb2.Message.
+        # event.Info contains sender/chat metadata.
+        # event.Message contains the actual WhatsApp text/media payload.
+        msg = event
+
+        # Some WhatsApp events are history sync / internal events and do not have Info.
+        # Ignore those events so they do not create callback errors.
+        if msg is None or not hasattr(msg, "Info"):
+            logger.debug("Ignoring non-message event without Info")
+            return
 
         # Extract message info
         info = msg.Info
-        sender_jid = str(JIDToNonAD(info.MessageSource.Sender))
-        chat_jid = str(JIDToNonAD(info.MessageSource.Chat))
-        is_group = info.MessageSource.IsGroup
-        is_from_me = info.MessageSource.IsFromMe
-        push_name = info.Pushname
+
+        try:
+            source = info.MessageSource
+            sender_jid = self._jid_to_str(source.Sender)
+            chat_jid = self._jid_to_str(source.Chat)
+            sender_number = self._resolve_phone_number(sender_jid)
+
+            is_group = source.IsGroup
+            is_from_me = source.IsFromMe
+            push_name = info.Pushname
+        except Exception as e:
+            logger.exception(f"Failed to parse message source: {e}")
+            return
 
         # Ignore messages from self
         if is_from_me:
@@ -72,7 +168,7 @@ class WhatsAppClient:
         # Extract text content
         text = self._extract_text(msg)
         if not text:
-            return  # Skip non-text messages for now
+            return
 
         logger.info(
             f"Message from {push_name} ({sender_jid}) "
@@ -84,36 +180,68 @@ class WhatsAppClient:
 
         # Call the message handler
         if self._message_handler:
-            self._message_handler(
-                sender_number=sender_jid.split("@")[0],
-                sender_name=push_name,
-                chat_jid=chat_jid,
-                text=text,
-                is_group=is_group,
-                mentioned_jids=mentioned_jids,
-                raw_message=msg,
-            )
+            try:
+                logger.info(
+                    f"Calling message router with sender_number={sender_number}, "
+                    f"chat_jid={chat_jid}, is_group={is_group}"
+                )
+                self._message_handler(
+                    sender_number=sender_number,
+                    sender_name=push_name,
+                    chat_jid=chat_jid,
+                    text=text,
+                    is_group=is_group,
+                    mentioned_jids=mentioned_jids,
+                    raw_message=msg,
+                )
+                logger.info("Message router finished successfully")
+            except Exception as e:
+                logger.exception(f"Message router failed: {e}")
+        else:
+            logger.warning("No message handler registered")
 
     def _extract_text(self, msg: Message) -> Optional[str]:
         """Extract text content from a message."""
-        message = msg.Message
+        try:
+            message = msg.Message
 
-        # Regular text message
-        if message.conversation:
-            return message.conversation
+            # Regular text message
+            if getattr(message, "conversation", None):
+                return message.conversation
 
-        # Extended text message (quoted, linked, etc.)
-        if message.extendedTextMessage and message.extendedTextMessage.text:
-            return message.extendedTextMessage.text
+            # Extended text message
+            if message.extendedTextMessage and message.extendedTextMessage.text:
+                return message.extendedTextMessage.text
 
-        return None
+            return None
+        except Exception as e:
+            logger.debug(f"Could not extract text: {e}")
+            return None
 
     def _extract_mentions(self, msg: Message) -> list[str]:
-        """Extract mentioned JIDs from a message."""
-        message = msg.Message
-        if message.extendedTextMessage and message.extendedTextMessage.contextInfo:
-            return list(message.extendedTextMessage.contextInfo.mentionedJid)
-        return []
+        """Extract mentioned JIDs from a message safely."""
+        try:
+            message = msg.Message
+
+            if not message.extendedTextMessage:
+                return []
+
+            context_info = getattr(message.extendedTextMessage, "contextInfo", None)
+            if not context_info:
+                return []
+
+            mentioned = getattr(context_info, "mentionedJid", None)
+            if mentioned is None:
+                mentioned = getattr(context_info, "mentionedJID", None)
+
+            if mentioned is None:
+                return []
+
+            return list(mentioned)
+
+        except Exception as e:
+            logger.debug(f"Could not extract mentions: {e}")
+            return []
 
     def send_reply(self, chat_jid: str, text: str, quoted_message=None) -> bool:
         """Send a text reply to a chat."""
@@ -124,7 +252,6 @@ class WhatsAppClient:
         try:
             from neonize.utils.jid import build_jid
 
-            # Parse the JID
             parts = chat_jid.split("@")
             if len(parts) == 2:
                 user, server = parts
@@ -134,14 +261,14 @@ class WhatsAppClient:
 
             jid = build_jid(user, server)
             self.client.send_message(jid, text)
-            logger.debug(f"Reply sent to {chat_jid}: {text[:50]}...")
+            logger.info(f"Reply sent to {chat_jid}: {text[:80]}...")
             return True
         except Exception as e:
             logger.error(f"Failed to send reply to {chat_jid}: {e}")
             return False
 
     def start(self) -> None:
-        """Start the WhatsApp client (blocking)."""
+        """Start the WhatsApp client."""
         if not self.client:
             self.initialize()
 

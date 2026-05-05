@@ -1,10 +1,10 @@
 """
-Message router.
+Message router..
 
 Routes incoming WhatsApp messages to the appropriate handler:
-- /admin → admin_commands
-- /remember, /forget, /memory → memory_manager
-- Everything else → rag_engine
+- /admin -> admin_commands
+- /remember, /forget, /memory -> memory_manager
+- Everything else -> rag_engine
 
 Logs all conversations to MySQL.
 """
@@ -38,60 +38,63 @@ class MessageRouter:
         """
         Main message handler called by the WhatsApp client.
 
-        Flow per spec Section 8:
-        1. Extract sender info (done by WhatsApp client)
-        2. Ignore self-messages (done by WhatsApp client)
-        3. Check sender in MySQL users table
-        4. If not allowed, ignore or reply with rejection
-        5. Route to /admin, /remember, /forget, /memory, or RAG
-        6. Reply via WhatsApp
-        7. Log conversation to MySQL
+        Flow:
+        1. Check sender in MySQL users table.
+        2. Auto-register unknown users as user.
+        3. Ignore blocked users.
+        4. If group message, only respond when bot is tagged.
+        5. Route admin commands, memory commands, or RAG.
+        6. Send reply.
+        7. Log conversation to MySQL.
         """
         start_time = time.time()
+        logger.info(
+            f"Router started: sender_number={sender_number}, "
+            f"chat_jid={chat_jid}, is_group={is_group}, text={text}"
+        )
 
-        # ── Step 1: Check user permissions ───────────────────────────────
+        text_stripped = text.strip()
+        reply = ""
+        rag_sources = None
+        rag_result = None
+
+        # Step 1: Check user permissions
         user = mysql_store.get_user(sender_number)
 
         if not user:
-            # Auto-register unknown users with 'user' role
-            # The owner can later block them if needed
             mysql_store.add_user(sender_number, sender_name or "Unknown", "user")
             user = mysql_store.get_user(sender_number)
             logger.info(f"Auto-registered new user: {sender_number} ({sender_name})")
 
         if not mysql_store.is_allowed(sender_number):
             logger.info(f"Blocked user attempted message: {sender_number}")
-            return  # Silently ignore blocked users
+            return
 
-        # ── Step 1.5: Handle Group Logic ─────────────────────────────────
+        # Step 2: Group logic
         bot_jid = f"{settings.whatsapp_bot_number}@s.whatsapp.net"
-        reply_chat_jid = chat_jid  # Default: reply to the chat where msg came from
+        reply_chat_jid = chat_jid
 
         if is_group:
             mentioned_jids = mentioned_jids or []
+
             if bot_jid not in mentioned_jids:
-                return  # Ignore group messages where bot is not tagged
-            
-            # If tagged in group, reply via personal chat (DM) instead
+                logger.debug("Ignoring group message because bot was not mentioned")
+                return
+
+            # If tagged in group, reply personally to sender
             reply_chat_jid = f"{sender_number}@s.whatsapp.net"
             logger.info(f"Bot tagged in group, replying personally to {sender_number}")
 
-        # ── Step 2: Route the message ────────────────────────────────────
-        reply = ""
-        text_stripped = text.strip()
-
+        # Step 3: Route message
         if admin_commands.is_admin_command(text_stripped):
-            # Admin commands
             result = admin_commands.execute(text_stripped, sender_number)
             reply = result.message
 
         elif memory_manager.is_memory_command(text_stripped):
-            # Memory commands
             result = memory_manager.handle_command(text_stripped, sender_number)
             reply = result.message
 
         else:
-            # RAG pipeline
             rag_result = rag_engine.answer(
                 question=text_stripped,
                 sender_number=sender_number,
@@ -99,21 +102,17 @@ class MessageRouter:
             )
             reply = rag_result.answer
 
-            # Log response time from RAG
-            elapsed_ms = rag_result.response_time_ms
-
-        # ── Step 3: Send reply ───────────────────────────────────────────
-        if reply:
-            whatsapp_client.send_reply(reply_chat_jid, reply)
-
-        # ── Step 4: Log conversation ─────────────────────────────────────
-        elapsed_ms = int((time.time() - start_time) * 1000)
-
-        rag_sources = None
-        if not admin_commands.is_admin_command(text_stripped) and not memory_manager.is_memory_command(text_stripped):
-            # Only log RAG sources for regular messages
             if hasattr(rag_result, "sources"):
                 rag_sources = rag_result.sources
+
+        # Step 4: Send reply
+        if reply:
+            whatsapp_client.send_reply(reply_chat_jid, reply)
+        else:
+            logger.warning("No reply generated for message")
+
+        # Step 5: Log conversation
+        elapsed_ms = int((time.time() - start_time) * 1000)
 
         mysql_store.log_conversation(
             sender_number=sender_number,
@@ -125,6 +124,8 @@ class MessageRouter:
             rag_sources=rag_sources,
             response_time_ms=elapsed_ms,
         )
+
+        logger.info(f"Router finished in {elapsed_ms} ms")
 
 
 # Singleton instance
