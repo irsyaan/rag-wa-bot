@@ -28,8 +28,21 @@ from app.qdrant_store import qdrant_store
 class MessageRouter:
     """Routes incoming messages to appropriate handlers."""
 
+    _GREETING_WORDS = {
+        "halo",
+        "hallo",
+        "hello",
+        "helo",
+        "hai",
+        "hi",
+        "hey",
+        "pagi",
+        "siang",
+        "sore",
+        "malam",
+    }
     _GREETING_RE = re.compile(
-        r"^\s*(hi|hello|hey|halo|hallo|hai|pagi|selamat pagi|siang|"
+        r"^\s*(hi|hy|hello|helo+|hey|halo+|hallo+|hai+|pagi|selamat pagi|siang|"
         r"selamat siang|sore|selamat sore|malam|selamat malam)\s*[!.?]*\s*$",
         re.IGNORECASE,
     )
@@ -40,7 +53,35 @@ class MessageRouter:
 
     def _is_greeting(self, text: str) -> bool:
         """Return True for pure greetings that do not need RAG."""
-        return bool(self._GREETING_RE.match(text or ""))
+        text = (text or "").strip().lower()
+        if self._GREETING_RE.match(text):
+            return True
+
+        normalized = re.sub(r"[^a-zA-Z]", "", text)
+        if not normalized or len(normalized) > 12:
+            return False
+
+        return any(self._edit_distance(normalized, word) <= 1 for word in self._GREETING_WORDS)
+
+    @staticmethod
+    def _edit_distance(left: str, right: str) -> int:
+        """Tiny Levenshtein distance for short greeting typo detection."""
+        if left == right:
+            return 0
+        if abs(len(left) - len(right)) > 1:
+            return 2
+
+        previous = list(range(len(right) + 1))
+        for i, left_char in enumerate(left, start=1):
+            current = [i]
+            for j, right_char in enumerate(right, start=1):
+                insert_cost = current[j - 1] + 1
+                delete_cost = previous[j] + 1
+                replace_cost = previous[j - 1] + (left_char != right_char)
+                current.append(min(insert_cost, delete_cost, replace_cost))
+            previous = current
+
+        return previous[-1]
 
     def _greeting_reply(self, text: str, sender_name: Optional[str]) -> str:
         """Fast deterministic greeting reply."""

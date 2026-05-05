@@ -501,6 +501,8 @@ class RagEngine:
             "You classify short WhatsApp messages for an IT assistant. "
             "Return ONLY compact JSON with keys: intent, entity, suffix, language. "
             "intent must be one of: greeting, ip_lookup, other. "
+            "Treat greeting typos and casual variants as greeting, for example "
+            "helo, heloo, hy, haii, hallo, halo, pagi, siang, sore, malam. "
             "For ip_lookup, entity is the target system/location/device only, "
             "without filler words like gw, lupa, berapa, brp, ini, sih. "
             "suffix is only the last IP octet if the user asks by suffix, otherwise empty. "
