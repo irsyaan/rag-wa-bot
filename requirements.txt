@@ -26,3 +26,6 @@ apscheduler==3.10.4
 # Optional API/healthcheck layer
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+
+# Document processing
+PyPDF2==3.0.1

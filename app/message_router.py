@@ -20,6 +20,8 @@ from app.admin_commands import admin_commands
 from app.memory_manager import memory_manager
 from app.rag_engine import rag_engine
 from app.whatsapp_client import whatsapp_client
+from app.document_processor import document_processor
+from app.qdrant_store import qdrant_store
 
 
 class MessageRouter:
@@ -34,6 +36,7 @@ class MessageRouter:
         is_group: bool,
         mentioned_jids: list[str] = None,
         raw_message=None,
+        document_msg=None,
     ) -> None:
         """
         Main message handler called by the WhatsApp client.
@@ -155,7 +158,51 @@ class MessageRouter:
                 result = memory_manager.handle_command(text_stripped, sender_number)
                 reply = result.message
 
-        else:
+        elif text_stripped.lower().startswith("/forgetdoc "):
+            if role not in ["admin", "owner"]:
+                reply = rag_engine.get_rejection_message(text_stripped)
+            else:
+                filename = text_stripped[11:].strip()
+                deleted = qdrant_store.delete_by_filter(
+                    settings.qdrant_knowledge_collection, "filename", filename
+                )
+                if deleted:
+                    reply = f"✅ Deleted all knowledge chunks for document '{filename}' from vector database."
+                else:
+                    reply = f"❌ Failed to delete document '{filename}' or it was not found."
+
+        elif document_msg:
+            # Handle PDF uploads
+            if is_group:
+                reply = "⚠️ Document uploads are only supported in private chats."
+            elif role not in ["admin", "owner"]:
+                reply = "⚠️ You do not have permission to upload documents to the knowledge base."
+            elif document_msg.mimetype != "application/pdf":
+                reply = "⚠️ Only PDF documents are supported for upload."
+            else:
+                # Tell the user we're processing
+                whatsapp_client.send_reply(reply_chat_jid, f"⏳ Downloading and processing '{document_msg.fileName}'...")
+                
+                # Download
+                try:
+                    import os
+                    media_bytes = whatsapp_client.client.download_any(raw_message.Message)
+                    
+                    filename = document_msg.fileName or "uploaded.pdf"
+                    file_path = os.path.join(settings.rag_upload_dir, filename)
+                    
+                    # Ensure directory exists
+                    os.makedirs(settings.rag_upload_dir, exist_ok=True)
+                    
+                    with open(file_path, "wb") as f:
+                        f.write(media_bytes)
+                    
+                    # Process
+                    success, msg = document_processor.process_pdf(file_path, filename, sender_number)
+                    reply = msg
+                except Exception as e:
+                    logger.exception(f"Failed to download/process PDF: {e}")
+                    reply = f"❌ Failed to process document: {str(e)}"
             # Send everything to RAG — the main model handles greetings too
             rag_result = rag_engine.answer(
                 question=text_stripped,

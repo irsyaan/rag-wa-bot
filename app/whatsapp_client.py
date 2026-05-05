@@ -165,14 +165,21 @@ class WhatsAppClient:
         if is_from_me:
             return
 
-        # Extract text content
-        text = self._extract_text(msg)
-        if not text:
+        # Check for document message
+        document_msg = getattr(msg.Message, "documentMessage", None)
+        if document_msg and not getattr(document_msg, "mimetype", None):
+            document_msg = None
+
+        # Extract text content (could be caption)
+        text = self._extract_text(msg) or ""
+        
+        if not text and not document_msg:
             return
 
         logger.info(
             f"Message from {push_name} ({sender_jid}) "
-            f"{'[group]' if is_group else '[private]'}: {text[:80]}..."
+            f"{'[group]' if is_group else '[private]'}: {text[:80]}... "
+            f"[{'Document: ' + document_msg.mimetype if document_msg else 'No Doc'}]"
         )
 
         # Extract mentioned JIDs
@@ -193,6 +200,7 @@ class WhatsAppClient:
                     is_group=is_group,
                     mentioned_jids=mentioned_jids,
                     raw_message=msg,
+                    document_msg=document_msg,
                 )
                 logger.info("Message router finished successfully")
             except Exception as e:
@@ -201,7 +209,7 @@ class WhatsAppClient:
             logger.warning("No message handler registered")
 
     def _extract_text(self, msg: Message) -> Optional[str]:
-        """Extract text content from a message."""
+        """Extract text content from a message (or its caption)."""
         try:
             message = msg.Message
 
@@ -210,8 +218,12 @@ class WhatsAppClient:
                 return message.conversation
 
             # Extended text message
-            if message.extendedTextMessage and message.extendedTextMessage.text:
+            if getattr(message, "extendedTextMessage", None) and message.extendedTextMessage.text:
                 return message.extendedTextMessage.text
+
+            # Document message caption
+            if getattr(message, "documentMessage", None) and message.documentMessage.caption:
+                return message.documentMessage.caption
 
             return None
         except Exception as e:
