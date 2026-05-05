@@ -68,10 +68,10 @@ class RagEngine:
 
         # Different threshold per collection.
         # Personal memory should be more flexible because users often ask casually/slang.
-        # Document knowledge should stay stricter.
+        # Document knowledge also needs flexibility for cross-lingual or brief queries.
         self.collection_thresholds = {
             self.memory_collection: 0.45,
-            self.knowledge_collection: self.default_score_threshold,
+            self.knowledge_collection: 0.45,
             self.chat_collection: 0.55,
         }
 
