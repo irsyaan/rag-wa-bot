@@ -242,10 +242,22 @@ class RagEngine:
         sender_name: str = "User",
     ) -> str:
         """Ask Ollama using retrieved context. Also handles greetings."""
-        current_time = datetime.now().strftime("%H:%M")
+        now = datetime.now()
+        current_time = now.strftime("%H:%M")
+        hour = now.hour
+
+        if 5 <= hour < 12:
+            time_period = "morning (pagi)"
+        elif 12 <= hour < 15:
+            time_period = "afternoon (siang)"
+        elif 15 <= hour < 18:
+            time_period = "afternoon (sore)"
+        else:
+            time_period = "evening (malam)"
 
         prompt = RAG_SYSTEM_PROMPT.format(
             current_time=current_time,
+            time_period=time_period,
             sender_name=sender_name or "User",
             role=role,
             context=context or "No context available.",
