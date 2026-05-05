@@ -7,8 +7,6 @@ __pycache__
 .git
 .gitignore
 *.md
-wheelhouse/
-migrations/
 .vscode/
 .idea/
 *.egg-info/

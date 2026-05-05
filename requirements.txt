@@ -10,6 +10,10 @@ mysql-connector-python==9.7.0
 
 # Vector database
 qdrant-client==1.17.1
+numpy==2.2.6
+
+# Proxy support for httpx/qdrant-client in proxy mode
+socksio==1.0.0
 
 # App structure and validation
 pydantic==2.10.4
@@ -22,6 +26,3 @@ apscheduler==3.10.4
 # Optional API/healthcheck layer
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-
-numpy==2.2.6
-socksio==1.0.0
