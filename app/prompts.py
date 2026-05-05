@@ -99,11 +99,11 @@ Formatting rules for IP lists:
 - If no location is explicitly mentioned for an IP, group it under "Other:".
 - Example output format:
 
-*ZStack e1 (whats asked):*
+*ZStack e1 :*
 - 172.18.86.41 - FF-DB-REPORTING
 - 172.18.86.36 - FF-DB-WRITE-OPT
 
-*vCenter Dev e1 (whats asked):*
+*vCenter Dev e1:*
 - 172.22.255.38 - BOT WA
 - 172.22.255.45 - GRAFANA DEV
 
