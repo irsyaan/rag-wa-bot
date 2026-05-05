@@ -87,6 +87,22 @@ class QdrantStore:
                     ),
                 )
                 logger.info(f"Created Qdrant collection '{name}'")
+                
+                # Create Full-Text index for Hybrid Search
+                # We index the common text fields
+                for field in ["text", "content", "memory", "chunk_text"]:
+                    self.client.create_payload_index(
+                        collection_name=name,
+                        field_name=field,
+                        field_schema=qmodels.TextIndexParams(
+                            type="text",
+                            tokenizer=qmodels.TokenizerType.WORD,
+                            min_token_len=2,
+                            max_token_len=20,
+                            lowercase=True,
+                        ),
+                    )
+                    logger.info(f"Created full-text index on {name}.{field}")
             except UnexpectedResponse as e:
                 logger.warning(f"Collection '{name}' creation issue: {e}")
 
@@ -161,12 +177,21 @@ class QdrantStore:
         self,
         collection: str,
         query_vector: list[float],
+        query_text: Optional[str] = None,
         limit: Optional[int] = None,
         score_threshold: Optional[float] = None,
         filter_conditions: Optional[qmodels.Filter] = None,
     ) -> list[dict]:
         """
-        Similarity search in a collection.
+        Hybrid similarity search (Vector + Keyword).
+
+        Args:
+            collection: Collection name.
+            query_vector: 1024-dim embedding vector.
+            query_text: Optional raw text for keyword search.
+            limit: Max results.
+            score_threshold: Min score.
+            filter_conditions: Optional Qdrant filter.
 
         Returns:
             List of dicts with 'id', 'score', and 'payload' keys.
@@ -175,9 +200,41 @@ class QdrantStore:
         score_threshold = score_threshold or settings.rag_score_threshold
 
         try:
+            # If query_text is provided, we perform a Hybrid query using prefetch.
+            # Qdrant's query_points can combine multiple search signals.
+            
+            # 1. Vector prefetch
+            prefetch_vector = qmodels.Prefetch(
+                query=query_vector,
+                limit=limit,
+            )
+
+            # 2. Keyword prefetch (if text provided)
+            # We look for the text in 'text', 'content', or 'memory' fields
+            prefetches = [prefetch_vector]
+            
+            if query_text:
+                # We use a filter-based search for exact tokens/keywords
+                # This ensures ".45" matches ".45" in the text
+                keyword_filter = qmodels.Filter(
+                    should=[
+                        qmodels.FieldCondition(key="text", match=qmodels.MatchText(text=query_text)),
+                        qmodels.FieldCondition(key="content", match=qmodels.MatchText(text=query_text)),
+                        qmodels.FieldCondition(key="memory", match=qmodels.MatchText(text=query_text)),
+                    ]
+                )
+                
+                prefetch_keyword = qmodels.Prefetch(
+                    filter=keyword_filter,
+                    limit=limit,
+                )
+                prefetches.append(prefetch_keyword)
+
+            # Perform the combined query
             results = self.client.query_points(
                 collection_name=collection,
-                query=query_vector,
+                prefetch=prefetches,
+                query=query_vector, # Main query for ranking
                 limit=limit,
                 score_threshold=score_threshold,
                 query_filter=filter_conditions,
@@ -192,8 +249,8 @@ class QdrantStore:
                 })
 
             logger.debug(
-                f"Search '{collection}': {len(hits)} results "
-                f"(threshold={score_threshold})"
+                f"Hybrid Search '{collection}': {len(hits)} results "
+                f"(query_text='{query_text}')"
             )
             return hits
         except Exception as e:

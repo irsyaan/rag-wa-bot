@@ -145,38 +145,24 @@ class RagEngine:
         """Get score threshold for a specific collection."""
         return self.collection_thresholds.get(collection, self.default_score_threshold)
 
-    def _search_collection(self, collection: str, vector: List[float]) -> List[RagSource]:
-        """Search one Qdrant collection."""
+    def _search_collection(self, collection: str, vector: List[float], question: Optional[str] = None) -> List[RagSource]:
+        """Search one Qdrant collection with Hybrid (Vector + Keyword)."""
         threshold = self._threshold_for_collection(collection)
 
         try:
-            data = self._post_json(
-                f"{self.qdrant_url}/collections/{collection}/points/query",
-                {
-                    "query": vector,
-                    "limit": self.max_results,
-                    "with_payload": True,
-                },
-                timeout=60,
+            results = qdrant_store.search(
+                collection=collection,
+                query_vector=vector,
+                query_text=question,
+                limit=self.max_results,
+                score_threshold=threshold,
             )
 
-            points = self._extract_points(data)
             sources: List[RagSource] = []
-
-            for point in points:
+            for point in results:
                 score = float(point.get("score", 0.0))
                 payload = point.get("payload") or {}
                 text = self._payload_text(payload)
-
-                if not text:
-                    continue
-
-                if score < threshold:
-                    logger.debug(
-                        f"Skipping low-score result from {collection}: "
-                        f"score={score:.4f}, threshold={threshold:.4f}"
-                    )
-                    continue
 
                 sources.append(
                     RagSource(
@@ -188,11 +174,7 @@ class RagEngine:
                     )
                 )
 
-            logger.info(
-                f"Qdrant search {collection}: {len(sources)} usable results "
-                f"(threshold={threshold:.2f})"
-            )
-
+            logger.info(f"Qdrant search {collection}: {len(sources)} results (threshold={threshold})")
             return sources
 
         except Exception as e:
@@ -206,7 +188,7 @@ class RagEngine:
         all_sources: List[RagSource] = []
 
         for collection in self.collections:
-            results = self._search_collection(collection, vector)
+            results = self._search_collection(collection, vector, question)
             all_sources.extend(results)
 
         all_sources.sort(key=lambda item: item.score, reverse=True)
