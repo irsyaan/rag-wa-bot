@@ -3,16 +3,16 @@ RAG engine.
 
 Flow:
 1. Embed the user question using Ollama bge-m3.
-2. Search Qdrant collections:
-   - personal_memory
-   - personal_knowledge
-   - conversation_memory
+2. Search Qdrant collections (hybrid: vector + keyword).
 3. Keep results above collection-specific score thresholds.
 4. Build context.
-5. Ask Ollama qwen3-8b-rag using only the retrieved context.
-6. Return answer, sources, and response time.
+5. Ask Ollama main model using only the retrieved context.
+6. Clean answer (strip <think> tags, whitespace).
+7. Return answer, sources, and response time.
 """
 
+import json
+import re
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
@@ -24,8 +24,71 @@ from loguru import logger
 
 from app.config import settings
 from app.mysql_store import mysql_store
-from app.prompts import RAG_SYSTEM_PROMPT
+from app.prompts import NO_CONTEXT_REPLY, NO_CONTEXT_REPLY_EN, RAG_SYSTEM_PROMPT
 from app.qdrant_store import qdrant_store
+
+
+# ── Shared Ollama options for deterministic, fast output ─────────────────────
+
+OLLAMA_CHAT_OPTIONS = {
+    "temperature": 0,
+    "top_p": 0.8,
+    "top_k": 20,
+    "repeat_penalty": 1.1,
+    "num_ctx": 2048,
+    "num_predict": 160,
+}
+
+OLLAMA_PARSE_OPTIONS = {
+    "temperature": 0,
+    "top_p": 0.8,
+    "top_k": 20,
+    "repeat_penalty": 1.05,
+    "num_ctx": 512,
+    "num_predict": 80,
+}
+
+IP_LOOKUP_SCORE_THRESHOLD = 0.45
+MIN_RAG_BEST_SCORE = 0.62
+IP_RELEVANCE_STOPWORDS = {
+    "ada",
+    "alamat",
+    "apa",
+    "apakah",
+    "berapa",
+    "bot",
+    "butuh",
+    "cari",
+    "coba",
+    "dan",
+    "dari",
+    "di",
+    "for",
+    "give",
+    "ip",
+    "ipv4",
+    "itu",
+    "list",
+    "lookup",
+    "mana",
+    "me",
+    "minta",
+    "nya",
+    "saja",
+    "saya",
+    "server",
+    "show",
+    "the",
+    "tolong",
+    "untuk",
+    "what",
+    "whats",
+    "yang",
+}
+IP_PATTERN = re.compile(
+    r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"
+)
 
 
 @dataclass
@@ -42,6 +105,15 @@ class RagResult:
     answer: str
     sources: List[Dict[str, Any]] = field(default_factory=list)
     response_time_ms: int = 0
+
+
+@dataclass
+class ParsedIntent:
+    intent: str = "unknown"
+    entity: str = ""
+    suffix: str = ""
+    language: str = "id"
+    used_llm: bool = False
 
 
 class RagEngine:
@@ -72,9 +144,9 @@ class RagEngine:
         # Personal memory should be more flexible because users often ask casually/slang.
         # Document knowledge also needs flexibility for cross-lingual or brief queries.
         self.collection_thresholds = {
-            self.memory_collection: 0.45,
-            self.knowledge_collection: 0.45,
-            self.chat_collection: 0.55,
+            self.memory_collection: 0.62,
+            self.knowledge_collection: 0.62,
+            self.chat_collection: 0.68,
         }
 
         # Per-sender rolling conversation buffer: last 3 (user, bot) pairs
@@ -91,6 +163,27 @@ class RagEngine:
         response = self.http.post(url, json=payload, timeout=timeout)
         response.raise_for_status()
         return response.json()
+
+    # ── Answer cleaner ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _clean_model_answer(text: str) -> str:
+        """
+        Strip <think>...</think> blocks and leftover tags from model output.
+        Safety layer even when using models that shouldn't produce them.
+        """
+        # Remove full <think>...</think> blocks (greedy, multiline)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        # Remove leftover orphan tags
+        text = re.sub(r"</?think>", "", text)
+        text = text.strip()
+
+        if not text:
+            return "Maaf, saya belum bisa menjawab pertanyaan ini."
+
+        return text
+
+    # ── Embedding ────────────────────────────────────────────────────────
 
     def _embed(self, text: str) -> List[float]:
         """Create embedding using Ollama."""
@@ -109,6 +202,8 @@ class RagEngine:
             raise RuntimeError("Ollama embedding response did not contain embeddings")
 
         return embeddings[0]
+
+    # ── Qdrant helpers ───────────────────────────────────────────────────
 
     def _extract_points(self, qdrant_response: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
@@ -151,16 +246,24 @@ class RagEngine:
         """Get score threshold for a specific collection."""
         return self.collection_thresholds.get(collection, self.default_score_threshold)
 
-    def _search_collection(self, collection: str, vector: List[float], question: Optional[str] = None) -> List[RagSource]:
+    def _search_collection(
+        self,
+        collection: str,
+        vector: List[float],
+        question: Optional[str] = None,
+        threshold: Optional[float] = None,
+        limit: Optional[int] = None,
+    ) -> List[RagSource]:
         """Search one Qdrant collection with Hybrid (Vector + Keyword)."""
-        threshold = self._threshold_for_collection(collection)
+        threshold = threshold if threshold is not None else self._threshold_for_collection(collection)
+        limit = limit or self.max_results
 
         try:
             results = qdrant_store.search(
                 collection=collection,
                 query_vector=vector,
                 query_text=question,
-                limit=self.max_results,
+                limit=limit,
                 score_threshold=threshold,
             )
 
@@ -187,18 +290,41 @@ class RagEngine:
             logger.error(f"Qdrant search failed for collection {collection}: {e}")
             return []
 
-    def _search_all(self, question: str) -> List[RagSource]:
-        """Embed question and search all configured Qdrant collections."""
-        vector = self._embed(question)
+    def _search_all(
+        self,
+        question: str,
+        threshold: Optional[float] = None,
+        limit: Optional[int] = None,
+    ) -> Tuple[List[RagSource], int, int]:
+        """
+        Embed question and search all configured Qdrant collections.
 
+        Returns:
+            (sources, embed_ms, search_ms)
+        """
+        t0 = time.time()
+        vector = self._embed(question)
+        embed_ms = int((time.time() - t0) * 1000)
+
+        t1 = time.time()
         all_sources: List[RagSource] = []
 
+        limit = limit or self.max_results
+
         for collection in self.collections:
-            results = self._search_collection(collection, vector, question)
+            results = self._search_collection(
+                collection,
+                vector,
+                question,
+                threshold=threshold,
+                limit=limit,
+            )
             all_sources.extend(results)
 
         all_sources.sort(key=lambda item: item.score, reverse=True)
-        return all_sources[: self.max_results]
+        search_ms = int((time.time() - t1) * 1000)
+
+        return all_sources[:limit], embed_ms, search_ms
 
     def _build_context(self, sources: List[RagSource]) -> str:
         """Build context text for the LLM."""
@@ -222,6 +348,8 @@ class RagEngine:
 
         return "\n\n---\n\n".join(blocks)
 
+    # ── LLM call ─────────────────────────────────────────────────────────
+
     def _ask_ollama(
         self,
         question: str,
@@ -229,8 +357,13 @@ class RagEngine:
         role: str,
         sender_name: str = "User",
         recent_history: str = "",
-    ) -> str:
-        """Ask Ollama using retrieved context. Also handles greetings."""
+    ) -> Tuple[str, int]:
+        """
+        Ask Ollama using retrieved context.
+
+        Returns:
+            (answer_text, llm_ms)
+        """
         # Use configured timezone offset (default +7 for WIB)
         tz = timezone(timedelta(hours=settings.timezone_offset))
         now = datetime.now(tz)
@@ -259,6 +392,8 @@ class RagEngine:
 
         prompt += f"\n\nMessage:\n{question}\n\nAnswer:"
 
+        t0 = time.time()
+
         data = self._post_json(
             f"{self.ollama_url}/api/chat",
             {
@@ -272,17 +407,25 @@ class RagEngine:
                 "think": False,
                 "stream": False,
                 "keep_alive": "10m",
+                "options": OLLAMA_CHAT_OPTIONS,
             },
             timeout=180,
         )
+
+        llm_ms = int((time.time() - t0) * 1000)
 
         message = data.get("message") or {}
         answer = message.get("content", "").strip()
 
         if not answer:
-            return "Maaf, saya belum memiliki informasi yang cukup untuk menjawab pertanyaan ini."
+            return "Maaf, saya belum memiliki informasi yang cukup untuk menjawab pertanyaan ini.", llm_ms
 
-        return answer
+        # Clean any <think> leaks
+        answer = self._clean_model_answer(answer)
+
+        return answer, llm_ms
+
+    # ── Utility methods ──────────────────────────────────────────────────
 
     def _log_failed_question(
         self,
@@ -317,6 +460,300 @@ class RagEngine:
         except Exception as e:
             logger.warning(f"Could not log failed question: {e}")
 
+    @staticmethod
+    def _no_context_reply(question: str) -> str:
+        """Return no-context reply in the user's likely language."""
+        lowered = question.lower()
+        english_markers = {"what", "where", "which", "who", "when", "how", "show", "list", "give"}
+        if any(marker in lowered.split() for marker in english_markers):
+            return NO_CONTEXT_REPLY_EN
+        return NO_CONTEXT_REPLY
+
+    @staticmethod
+    def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+        """Extract the first JSON object from a small LLM parser response."""
+        if not text:
+            return None
+
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return None
+
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+
+        return parsed if isinstance(parsed, dict) else None
+
+    def parse_message_intent(self, text: str) -> ParsedIntent:
+        """
+        Use the fast model only as an intent/entity parser.
+
+        The parser must not answer facts. Python still executes retrieval and formatting.
+        """
+        text = (text or "").strip()
+        if not text:
+            return ParsedIntent()
+
+        system_prompt = (
+            "You classify short WhatsApp messages for an IT assistant. "
+            "Return ONLY compact JSON with keys: intent, entity, suffix, language. "
+            "intent must be one of: greeting, ip_lookup, other. "
+            "For ip_lookup, entity is the target system/location/device only, "
+            "without filler words like gw, lupa, berapa, brp, ini, sih. "
+            "suffix is only the last IP octet if the user asks by suffix, otherwise empty. "
+            "language is id or en. Do not answer the user. Do not invent IPs."
+        )
+
+        try:
+            data = self._post_json(
+                f"{self.ollama_url}/api/chat",
+                {
+                    "model": self.fast_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": text},
+                    ],
+                    "think": False,
+                    "stream": False,
+                    "keep_alive": "10m",
+                    "options": OLLAMA_PARSE_OPTIONS,
+                },
+                timeout=20,
+            )
+            content = data.get("message", {}).get("content", "")
+            parsed = self._extract_json_object(content)
+            if parsed:
+                intent = str(parsed.get("intent", "unknown")).strip().lower()
+                if intent not in {"greeting", "ip_lookup", "other"}:
+                    intent = "unknown"
+
+                entity = str(parsed.get("entity", "") or "").strip().lower()
+                suffix = str(parsed.get("suffix", "") or "").strip().lstrip(".")
+                language = str(parsed.get("language", "id") or "id").strip().lower()
+                if language not in {"id", "en"}:
+                    language = "id"
+
+                return ParsedIntent(
+                    intent=intent,
+                    entity=entity,
+                    suffix=suffix if suffix.isdigit() else "",
+                    language=language,
+                    used_llm=True,
+                )
+
+            logger.warning(f"Intent parser returned non-JSON response: {content[:120]}")
+
+        except Exception as e:
+            logger.warning(f"Fast intent parser failed, using fallback parser: {e}")
+
+        return self._fallback_parse_message_intent(text)
+
+    def _fallback_parse_message_intent(self, text: str) -> ParsedIntent:
+        """Deterministic backup when the fast parser is unavailable."""
+        lowered = text.lower()
+        suffixes = self._requested_ip_suffixes(text)
+
+        if IP_PATTERN.search(text) or "ip" in lowered or suffixes:
+            terms = self._query_terms_for_ip(text)
+            return ParsedIntent(
+                intent="ip_lookup",
+                entity=" ".join(sorted(terms)),
+                suffix=next(iter(suffixes), ""),
+                language="en" if any(word in lowered.split() for word in {"what", "which", "where"}) else "id",
+                used_llm=False,
+            )
+
+        return ParsedIntent(
+            intent="other",
+            language="en" if any(word in lowered.split() for word in {"hello", "hi", "hey"}) else "id",
+            used_llm=False,
+        )
+
+    @staticmethod
+    def _query_terms_for_ip(question: str) -> set[str]:
+        """Extract meaningful entity/location tokens for deterministic IP filtering."""
+        terms = set()
+        for token in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{1,}", question.lower()):
+            if token in IP_RELEVANCE_STOPWORDS:
+                continue
+            if token.isdigit():
+                continue
+            terms.add(token)
+        return terms
+
+    def _query_terms_from_entity(self, entity: str) -> set[str]:
+        """Convert parser entity into lookup tokens."""
+        if not entity:
+            return set()
+        return self._query_terms_for_ip(entity)
+
+    @staticmethod
+    def _requested_ip_suffixes(question: str) -> set[str]:
+        """Detect suffix lookups like '.38' or 'ending 38'."""
+        suffixes = set()
+        lowered = question.lower()
+        for match in re.findall(r"(?:\.|ending\s+|akhiran\s+|suffix\s+)(\d{1,3})\b", lowered):
+            suffixes.add(match)
+        return suffixes
+
+    @staticmethod
+    def _label_from_text(text: str) -> Optional[str]:
+        """Extract a compact server/host label from simple memory text."""
+        patterns = [
+            r"\b(?:adalah|is|name is|hostname is)\s+([a-zA-Z0-9][a-zA-Z0-9_.-]{1,})",
+            r"\b([a-zA-Z0-9][a-zA-Z0-9_.-]{1,})\s+(?:dan\s+)?(?:ip|ipnya|ip-nya)\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                label = match.group(1).strip(".,:; ")
+                if label.lower() not in IP_RELEVANCE_STOPWORDS:
+                    return label
+        return None
+
+    @staticmethod
+    def _ip_context(text: str, ip: str) -> str:
+        """Return the smallest useful text window around a matched IP."""
+        for line in text.splitlines():
+            if ip in line:
+                return line.strip()
+
+        index = text.find(ip)
+        if index < 0:
+            return text[:300]
+
+        start = max(0, index - 180)
+        end = min(len(text), index + len(ip) + 180)
+        return text[start:end].strip()
+
+    @staticmethod
+    def _source_label(source: RagSource) -> str:
+        payload_label = (
+            source.payload.get("name")
+            or source.payload.get("hostname")
+        )
+        if payload_label:
+            return payload_label
+
+        text_label = RagEngine._label_from_text(source.text)
+        if text_label:
+            return text_label
+
+        return (
+            source.payload.get("source")
+            or source.payload.get("filename")
+            or source.payload.get("source_name")
+            or source.collection
+        )
+
+    def answer_ip_lookup(
+        self,
+        question: str,
+        sender_number: str,
+        chat_jid: str,
+        parsed_intent: Optional[ParsedIntent] = None,
+    ) -> RagResult:
+        """Answer IP lookups deterministically from retrieved snippets without LLM generation."""
+        start_time = time.time()
+        question = question.strip()
+        logger.info(f"Direct IP lookup started for {sender_number}: {question}")
+
+        try:
+            parsed_intent = parsed_intent or self._fallback_parse_message_intent(question)
+            search_text = parsed_intent.entity or question
+            if parsed_intent.suffix and parsed_intent.suffix not in search_text:
+                search_text = f"{search_text} {parsed_intent.suffix}".strip()
+
+            sources, embed_ms, search_ms = self._search_all(
+                search_text,
+                threshold=IP_LOOKUP_SCORE_THRESHOLD,
+                limit=max(self.max_results, 8),
+            )
+            query_terms = self._query_terms_from_entity(parsed_intent.entity)
+            if not query_terms:
+                query_terms = self._query_terms_for_ip(question)
+            suffixes = {parsed_intent.suffix} if parsed_intent.suffix else self._requested_ip_suffixes(question)
+            matches = []
+
+            for source in sources:
+                text = source.text
+                ips = IP_PATTERN.findall(text)
+                if not ips:
+                    continue
+
+                for ip in ips:
+                    if suffixes and ip.rsplit(".", 1)[-1] not in suffixes:
+                        continue
+                    ip_context = self._ip_context(text, ip)
+                    label = self._label_from_text(ip_context) or self._source_label(source)
+                    context_lower = ip_context.lower()
+                    label_lower = label.lower()
+                    has_term_match = not query_terms or any(
+                        term in context_lower or term in label_lower for term in query_terms
+                    )
+                    if not has_term_match:
+                        continue
+                    matches.append((ip, label, source))
+
+            seen = set()
+            lines = []
+            matched_sources = []
+            for ip, label, source in matches:
+                key = (ip, label)
+                if key in seen:
+                    continue
+                seen.add(key)
+                lines.append(f"- {ip} - {label}")
+                matched_sources.append(source)
+
+            total_ms = int((time.time() - start_time) * 1000)
+
+            if not lines:
+                best_score = sources[0].score if sources else None
+                self._log_failed_question(sender_number, chat_jid, question, best_score)
+                logger.info(
+                    f"Direct IP lookup found no precise match. "
+                    f"embed={embed_ms}ms, search={search_ms}ms, total={total_ms}ms"
+                )
+                return RagResult(
+                    answer=self._no_context_reply(question),
+                    sources=[],
+                    response_time_ms=total_ms,
+                )
+
+            source_payloads = [
+                {
+                    "collection": source.collection,
+                    "point_id": source.point_id,
+                    "score": source.score,
+                    "source": self._source_label(source),
+                    "text": source.text[:500],
+                }
+                for source in matched_sources
+            ]
+
+            logger.info(
+                f"Direct IP lookup answered with {len(lines)} match(es). "
+                f"embed={embed_ms}ms, search={search_ms}ms, total={total_ms}ms"
+            )
+            return RagResult(
+                answer="\n".join(lines),
+                sources=source_payloads,
+                response_time_ms=total_ms,
+            )
+
+        except Exception as e:
+            logger.exception(f"Direct IP lookup failed: {e}")
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return RagResult(
+                answer="Maaf, terjadi error saat memproses pertanyaan.",
+                sources=[],
+                response_time_ms=elapsed_ms,
+            )
+
     def get_rejection_message(self, text: str) -> str:
         """Use the fast model to generate a translated rejection message."""
         prompt = f"Translate the exact phrase 'You don't have the permission to do this.' into the language used in the following text. Reply ONLY with the translated phrase, no quotes or extra words.\n\nText: {text}"
@@ -327,14 +764,18 @@ class RagEngine:
                     "model": self.fast_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
+                    "options": OLLAMA_CHAT_OPTIONS,
                 },
                 timeout=30,
             )
             message = data.get("message", {}).get("content", "").strip()
-            return message if message else "You don't have the permission to do this."
+            answer = self._clean_model_answer(message) if message else ""
+            return answer if answer else "You don't have the permission to do this."
         except Exception as e:
             logger.error(f"Failed to translate rejection message: {e}")
             return "You don't have the permission to do this."
+
+    # ── Main answer method ───────────────────────────────────────────────
 
     def answer(
         self,
@@ -344,7 +785,7 @@ class RagEngine:
         role: str = "user",
         sender_name: str = "User",
     ) -> RagResult:
-        """Main RAG answer function. Also handles greetings via the prompt."""
+        """Main RAG answer function for complex questions after direct handlers."""
         start_time = time.time()
         question = question.strip()
 
@@ -362,46 +803,63 @@ class RagEngine:
             recent_history = "(no recent conversation)"
 
         try:
-            sources = self._search_all(question)
+            # Step 1: Embed + Search
+            sources, embed_ms, search_ms = self._search_all(question)
 
-            if not sources:
-                logger.info("RAG found no sources — LLM will decide if greeting or no-info")
-            else:
+            best_score = sources[0].score if sources else None
+            if not sources or best_score < MIN_RAG_BEST_SCORE:
+                self._log_failed_question(sender_number, chat_jid, question, best_score)
+                total_ms = int((time.time() - start_time) * 1000)
                 logger.info(
-                    f"RAG found {len(sources)} source(s). "
-                    f"Best score={sources[0].score:.4f}, collection={sources[0].collection}"
+                    f"RAG stopped before LLM due weak/no retrieval. "
+                    f"best_score={best_score}, embed={embed_ms}ms, "
+                    f"search={search_ms}ms, total={total_ms}ms"
+                )
+                return RagResult(
+                    answer=self._no_context_reply(question),
+                    sources=[],
+                    response_time_ms=total_ms,
                 )
 
+            logger.info(
+                f"RAG found {len(sources)} source(s). "
+                f"Best score={sources[0].score:.4f}, collection={sources[0].collection}"
+            )
+
+            # Step 2: Build context
             context = self._build_context(sources)
-            answer = self._ask_ollama(
+            context_len = len(context)
+
+            # Step 3: Ask LLM
+            answer, llm_ms = self._ask_ollama(
                 question, context, role, sender_name=sender_name, recent_history=recent_history
             )
 
             # Store this exchange in the rolling buffer
             self._history[sender_number].append((question, answer))
 
+            # Step 4: Timing logs
+            total_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                f"RAG timing: embed={embed_ms}ms, search={search_ms}ms, "
+                f"context={context_len}chars, llm={llm_ms}ms, total={total_ms}ms"
+            )
+
             source_payloads = [
                 {
                     "collection": source.collection,
                     "point_id": source.point_id,
                     "score": source.score,
-                    "source": source.payload.get("source")
-                    or source.payload.get("filename")
-                    or source.payload.get("source_name")
-                    or source.collection,
+                    "source": self._source_label(source),
                     "text": source.text[:500],
                 }
                 for source in sources
             ]
 
-            elapsed_ms = int((time.time() - start_time) * 1000)
-
-            logger.info(f"RAG finished in {elapsed_ms} ms")
-
             return RagResult(
                 answer=answer,
                 sources=source_payloads,
-                response_time_ms=elapsed_ms,
+                response_time_ms=total_ms,
             )
 
         except Exception as e:

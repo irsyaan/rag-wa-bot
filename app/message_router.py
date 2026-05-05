@@ -9,6 +9,7 @@ Routes incoming WhatsApp messages to the appropriate handler:
 Logs all conversations to MySQL.
 """
 
+import re
 import time
 from typing import Optional
 
@@ -26,6 +27,38 @@ from app.qdrant_store import qdrant_store
 
 class MessageRouter:
     """Routes incoming messages to appropriate handlers."""
+
+    _GREETING_RE = re.compile(
+        r"^\s*(hi|hello|hey|halo|hallo|hai|pagi|selamat pagi|siang|"
+        r"selamat siang|sore|selamat sore|malam|selamat malam)\s*[!.?]*\s*$",
+        re.IGNORECASE,
+    )
+    _IP_LOOKUP_RE = re.compile(
+        r"\b(ip|ipv4|alamat ip|ip address)\b|(?:^|\s)\.\d{1,3}\b",
+        re.IGNORECASE,
+    )
+
+    def _is_greeting(self, text: str) -> bool:
+        """Return True for pure greetings that do not need RAG."""
+        return bool(self._GREETING_RE.match(text or ""))
+
+    def _greeting_reply(self, text: str, sender_name: Optional[str]) -> str:
+        """Fast deterministic greeting reply."""
+        lowered = (text or "").lower()
+        name = sender_name or "there"
+
+        if any(word in lowered for word in ["pagi", "siang", "sore", "malam", "halo", "hallo", "hai"]):
+            return f"Halo {name}, ada yang bisa saya bantu?"
+
+        return f"Hello {name}, how can I help?"
+
+    def _is_ip_lookup(self, text: str) -> bool:
+        """Return True for high-confidence IP lookup questions."""
+        return bool(self._IP_LOOKUP_RE.search(text or ""))
+
+    def _should_parse_intent(self, text: str) -> bool:
+        """Use fast parser for natural-language messages after command routing."""
+        return bool(text and not text.lstrip().startswith("/"))
 
     def handle_message(
         self,
@@ -60,6 +93,7 @@ class MessageRouter:
         reply = ""
         rag_sources = None
         rag_result = None
+        parsed_intent = None
 
         # Step 1: Check user permissions
         user = mysql_store.get_user(sender_number)
@@ -109,7 +143,6 @@ class MessageRouter:
                     text_stripped = text_stripped.replace(f"@{prefix}", "").strip()
             
             # Fallback: if there are still any @ mention patterns, clean them up
-            import re
             text_stripped = re.sub(r'@[0-9]+', '', text_stripped).strip()
 
             logger.info(f"Bot tagged in group, processing cleaned message: '{text_stripped}'")
@@ -199,30 +232,62 @@ class MessageRouter:
                 else:
                     # Tell the user we're processing
                     whatsapp_client.send_reply(reply_chat_jid, f"⏳ Downloading and processing '{filename}'...")
-                
-                # Download
-                try:
-                    import os
-                    media_bytes = whatsapp_client.client.download_any(raw_message.Message)
-                    
-                    filename = document_msg.fileName or "uploaded.pdf"
-                    file_path = os.path.join(settings.rag_upload_dir, filename)
-                    
-                    # Ensure directory exists
-                    os.makedirs(settings.rag_upload_dir, exist_ok=True)
-                    
-                    with open(file_path, "wb") as f:
-                        f.write(media_bytes)
-                    
-                    # Process
-                    success, msg = document_processor.process_pdf(file_path, filename, sender_number)
-                    reply = msg
-                except Exception as e:
-                    logger.exception(f"Failed to download/process PDF: {e}")
-                    reply = f"❌ Failed to process document: {str(e)}"
+
+                    # Download
+                    try:
+                        import os
+                        media_bytes = whatsapp_client.client.download_any(raw_message.Message)
+                        
+                        filename = document_msg.fileName or "uploaded.pdf"
+                        file_path = os.path.join(settings.rag_upload_dir, filename)
+                        
+                        # Ensure directory exists
+                        os.makedirs(settings.rag_upload_dir, exist_ok=True)
+                        
+                        with open(file_path, "wb") as f:
+                            f.write(media_bytes)
+                        
+                        # Process
+                        success, msg = document_processor.process_pdf(file_path, filename, sender_number)
+                        reply = msg
+                    except Exception as e:
+                        logger.exception(f"Failed to download/process PDF: {e}")
+                        reply = f"❌ Failed to process document: {str(e)}"
 
         else:
-            # Send everything to RAG — the main model handles greetings too
+            if self._should_parse_intent(text_stripped) and not self._is_greeting(text_stripped):
+                parsed_intent = rag_engine.parse_message_intent(text_stripped)
+                logger.info(
+                    f"Parsed message intent: intent={parsed_intent.intent}, "
+                    f"entity={parsed_intent.entity}, suffix={parsed_intent.suffix}, "
+                    f"used_llm={parsed_intent.used_llm}"
+                )
+
+        if reply:
+            pass
+
+        elif parsed_intent and parsed_intent.intent == "greeting":
+            reply = self._greeting_reply(text_stripped, sender_name)
+            logger.info("Handled parsed greeting directly without RAG/LLM answer generation")
+
+        elif self._is_greeting(text_stripped):
+            reply = self._greeting_reply(text_stripped, sender_name)
+            logger.info("Handled greeting directly without RAG/LLM")
+
+        elif (parsed_intent and parsed_intent.intent == "ip_lookup") or self._is_ip_lookup(text_stripped):
+            rag_result = rag_engine.answer_ip_lookup(
+                question=text_stripped,
+                sender_number=sender_number,
+                chat_jid=chat_jid,
+                parsed_intent=parsed_intent,
+            )
+            reply = rag_result.answer
+
+            if hasattr(rag_result, "sources"):
+                rag_sources = rag_result.sources
+
+        else:
+            # Use LLM RAG only after deterministic handlers decline the message.
             rag_result = rag_engine.answer(
                 question=text_stripped,
                 sender_number=sender_number,
@@ -254,8 +319,6 @@ class MessageRouter:
             rag_sources=rag_sources,
             response_time_ms=elapsed_ms,
         )
-
-        logger.info(f"Router finished in {elapsed_ms} ms")
 
         logger.info(f"Router finished in {elapsed_ms} ms")
 

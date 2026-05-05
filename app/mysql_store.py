@@ -340,7 +340,7 @@ class MySQLStore:
             cursor = conn.cursor(dictionary=True)
             # Only list active documents
             cursor.execute(
-                "SELECT id, filename, chunk_count, created_at FROM documents WHERE status = 'processed' ORDER BY created_at DESC"
+                "SELECT id, filename, chunk_count, created_at FROM documents WHERE status = 'done' ORDER BY created_at DESC"
             )
             return cursor.fetchall()
         except MySQLError as e:
@@ -355,7 +355,7 @@ class MySQLStore:
         try:
             cursor = conn.cursor(dictionary=True)
             cursor.execute(
-                "SELECT id, filename, status FROM documents WHERE filename = %s AND status != 'deleted' LIMIT 1",
+                "SELECT id, filename, status FROM documents WHERE filename = %s AND status IN ('pending', 'processing', 'done') LIMIT 1",
                 (filename,),
             )
             return cursor.fetchone()

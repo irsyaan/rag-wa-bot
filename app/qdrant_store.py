@@ -63,6 +63,35 @@ class QdrantStore:
         }
         return mapping.get(settings.qdrant_distance.lower(), qmodels.Distance.COSINE)
 
+    def _ensure_text_indexes(self, collection_name: str) -> None:
+        """Ensure full-text indexes exist for all payload text fields used in search."""
+        for field in ["text", "content", "memory", "chunk_text"]:
+            try:
+                self.client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name=field,
+                    field_schema=qmodels.TextIndexParams(
+                        type="text",
+                        tokenizer=qmodels.TokenizerType.WORD,
+                        min_token_len=2,
+                        max_token_len=20,
+                        lowercase=True,
+                    ),
+                )
+                logger.info(f"Created full-text index on {collection_name}.{field}")
+            except UnexpectedResponse as e:
+                message = str(e).lower()
+                if "already exists" in message or "duplicate" in message:
+                    logger.debug(f"Full-text index already exists on {collection_name}.{field}")
+                else:
+                    logger.warning(
+                        f"Could not create full-text index on {collection_name}.{field}: {e}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Could not ensure full-text index on {collection_name}.{field}: {e}"
+                )
+
     def ensure_collections(self) -> None:
         """Create all 3 required collections if they don't already exist."""
         collection_names = [
@@ -76,6 +105,7 @@ class QdrantStore:
         for name in collection_names:
             if name in existing:
                 logger.info(f"Qdrant collection '{name}' already exists")
+                self._ensure_text_indexes(name)
                 continue
 
             try:
@@ -87,24 +117,10 @@ class QdrantStore:
                     ),
                 )
                 logger.info(f"Created Qdrant collection '{name}'")
-                
-                # Create Full-Text index for Hybrid Search
-                # We index the common text fields
-                for field in ["text", "content", "memory", "chunk_text"]:
-                    self.client.create_payload_index(
-                        collection_name=name,
-                        field_name=field,
-                        field_schema=qmodels.TextIndexParams(
-                            type="text",
-                            tokenizer=qmodels.TokenizerType.WORD,
-                            min_token_len=2,
-                            max_token_len=20,
-                            lowercase=True,
-                        ),
-                    )
-                    logger.info(f"Created full-text index on {name}.{field}")
+                self._ensure_text_indexes(name)
             except UnexpectedResponse as e:
                 logger.warning(f"Collection '{name}' creation issue: {e}")
+                self._ensure_text_indexes(name)
 
     # ── Point Operations ─────────────────────────────────────────────────
 
