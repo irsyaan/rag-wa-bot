@@ -236,15 +236,11 @@ class RagEngine:
         prompt = f"""
 You are a personal WhatsApp RAG assistant.
 
-Answer the user question using only the context below.
-If the answer is in the context, answer directly and briefly.
-If the answer is not in the context, say:
-Maaf, saya belum memiliki informasi yang cukup untuk menjawab pertanyaan ini.
-
-Use Indonesian if the question is Indonesian.
-Use English if the question is English.
-Use casual Indonesian if the user asks casually.
-Do not show reasoning or thinking.
+1. Answer the user question using ONLY the context below.
+2. CRITICAL: You MUST reply in the EXACT SAME LANGUAGE as the user's Question. If the question is in English, reply in English. If the question is in Indonesian, reply in Indonesian. You must translate the context if it is in a different language.
+3. Keep the answer direct and brief.
+4. Do not show reasoning or thinking.
+5. If the answer is not in the context, reply with a polite message saying you don't have enough information, written in the same language as the Question.
 
 Context:
 {context}
