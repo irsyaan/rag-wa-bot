@@ -1,0 +1,24 @@
+# WhatsApp client
+neonize==0.3.17.post0
+
+# AI / LLM HTTP client
+requests==2.32.3
+python-dotenv==1.2.2
+
+# Database
+mysql-connector-python==9.7.0
+
+# Vector database
+qdrant-client==1.17.1
+
+# App structure and validation
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Logging and background jobs
+loguru==0.7.3
+apscheduler==3.10.4
+
+# Optional API/healthcheck layer
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
