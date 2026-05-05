@@ -7,7 +7,7 @@ Flow:
    - personal_memory
    - personal_knowledge
    - conversation_memory
-3. Keep results above score threshold.
+3. Keep results above collection-specific score thresholds.
 4. Build context.
 5. Ask Ollama qwen3-8b-rag using only the retrieved context.
 6. Return answer, sources, and response time.
@@ -46,21 +46,36 @@ class RagEngine:
     def __init__(self):
         self.ollama_url = settings.ollama_base_url.rstrip("/")
         self.qdrant_url = settings.qdrant_url.rstrip("/")
+
         self.embedding_model = settings.ollama_embedding_model
         self.main_model = settings.ollama_main_model
         self.fast_model = settings.ollama_fast_model
+
         self.max_results = int(settings.rag_max_results)
-        self.score_threshold = float(settings.rag_score_threshold)
+        self.default_score_threshold = float(settings.rag_score_threshold)
+
+        self.memory_collection = settings.qdrant_memory_collection
+        self.knowledge_collection = settings.qdrant_knowledge_collection
+        self.chat_collection = settings.qdrant_chat_collection
 
         self.collections = [
-            settings.qdrant_memory_collection,
-            settings.qdrant_knowledge_collection,
-            settings.qdrant_chat_collection,
+            self.memory_collection,
+            self.knowledge_collection,
+            self.chat_collection,
         ]
+
+        # Different threshold per collection.
+        # Personal memory should be more flexible because users often ask casually/slang.
+        # Document knowledge should stay stricter.
+        self.collection_thresholds = {
+            self.memory_collection: 0.45,
+            self.knowledge_collection: self.default_score_threshold,
+            self.chat_collection: 0.55,
+        }
 
         # Important:
         # In proxy mode, global HTTP_PROXY/HTTPS_PROXY exists for WhatsApp.
-        # For local Ollama/Qdrant calls, we do not want requests to use the proxy.
+        # For local Ollama/Qdrant calls, do not use proxy.
         self.http = requests.Session()
         self.http.trust_env = False
 
@@ -88,9 +103,9 @@ class RagEngine:
 
     def _extract_points(self, qdrant_response: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Support both Qdrant response shapes:
+        Support both Qdrant response shapes.
 
-        New query API:
+        Current query API:
         {
           "result": {
             "points": [...]
@@ -120,10 +135,17 @@ class RagEngine:
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+
         return ""
+
+    def _threshold_for_collection(self, collection: str) -> float:
+        """Get score threshold for a specific collection."""
+        return self.collection_thresholds.get(collection, self.default_score_threshold)
 
     def _search_collection(self, collection: str, vector: List[float]) -> List[RagSource]:
         """Search one Qdrant collection."""
+        threshold = self._threshold_for_collection(collection)
+
         try:
             data = self._post_json(
                 f"{self.qdrant_url}/collections/{collection}/points/query",
@@ -146,10 +168,10 @@ class RagEngine:
                 if not text:
                     continue
 
-                if score < self.score_threshold:
+                if score < threshold:
                     logger.debug(
                         f"Skipping low-score result from {collection}: "
-                        f"score={score}, threshold={self.score_threshold}"
+                        f"score={score:.4f}, threshold={threshold:.4f}"
                     )
                     continue
 
@@ -163,7 +185,11 @@ class RagEngine:
                     )
                 )
 
-            logger.info(f"Qdrant search {collection}: {len(sources)} usable results")
+            logger.info(
+                f"Qdrant search {collection}: {len(sources)} usable results "
+                f"(threshold={threshold:.2f})"
+            )
+
             return sources
 
         except Exception as e:
@@ -217,6 +243,7 @@ Maaf, saya belum memiliki informasi yang cukup untuk menjawab pertanyaan ini.
 
 Use Indonesian if the question is Indonesian.
 Use English if the question is English.
+Use casual Indonesian if the user asks casually.
 Do not show reasoning or thinking.
 
 Context:
@@ -297,12 +324,15 @@ Answer:
 
             if not sources:
                 elapsed_ms = int((time.time() - start_time) * 1000)
+
                 self._log_failed_question(
                     sender_number=sender_number,
                     chat_jid=chat_jid,
                     question=question,
                     best_score=None,
                 )
+
+                logger.info(f"RAG found no usable sources. Finished in {elapsed_ms} ms")
 
                 return RagResult(
                     answer=(
