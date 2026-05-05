@@ -10,6 +10,7 @@ Logs all conversations to MySQL.
 """
 
 import time
+import re
 from typing import Optional
 
 from loguru import logger
@@ -144,6 +145,10 @@ class MessageRouter:
                 result = memory_manager.handle_command(text_stripped, sender_number)
                 reply = result.message
 
+        elif rag_engine.classify_message(text_stripped) == "greeting":
+            reply = rag_engine.generate_greeting(text_stripped, sender_name=sender_name)
+            logger.info(f"Greeting detected, replied with: {reply[:80]}")
+
         else:
             rag_result = rag_engine.answer(
                 question=text_stripped,
@@ -175,6 +180,8 @@ class MessageRouter:
             rag_sources=rag_sources,
             response_time_ms=elapsed_ms,
         )
+
+        logger.info(f"Router finished in {elapsed_ms} ms")
 
         logger.info(f"Router finished in {elapsed_ms} ms")
 

@@ -23,7 +23,7 @@ from loguru import logger
 
 from app.config import settings
 from app.mysql_store import mysql_store
-from app.prompts import RAG_SYSTEM_PROMPT
+from app.prompts import RAG_SYSTEM_PROMPT, CLASSIFY_SYSTEM_PROMPT, GREETING_SYSTEM_PROMPT
 
 
 @dataclass
@@ -235,13 +235,11 @@ class RagEngine:
 
     def _ask_ollama(self, question: str, context: str, role: str) -> str:
         """Ask Ollama using retrieved context only."""
-        current_time = datetime.now().strftime("%H:%M")
-        
         # Use centralized prompt from prompts.py
         prompt = RAG_SYSTEM_PROMPT.format(
-            current_time=current_time,
             role=role,
-            context=context or "No specific context found."
+            context=context or "No specific context found.",
+            memory_context="",
         )
         
         # Add the actual question as the final message
@@ -323,6 +321,54 @@ class RagEngine:
             logger.error(f"Failed to translate rejection message: {e}")
             return "You don't have the permission to do this."
 
+    def classify_message(self, text: str) -> str:
+        """Use the fast model to classify the user's intent."""
+        prompt = f"{CLASSIFY_SYSTEM_PROMPT}\n\nMessage: {text}"
+        try:
+            data = self._post_json(
+                f"{self.ollama_url}/api/chat",
+                {
+                    "model": self.fast_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                },
+                timeout=10,
+            )
+            message = data.get("message", {}).get("content", "").strip().lower()
+            
+            for category in ["greeting", "question", "command", "chitchat", "unclear"]:
+                if category in message:
+                    return category
+                    
+            return "unclear"
+        except Exception as e:
+            logger.error(f"Failed to classify message: {e}")
+            return "unclear"
+
+    def generate_greeting(self, text: str, sender_name: str = "User") -> str:
+        """Generate a time-aware greeting response using the fast model."""
+        current_time = datetime.now().strftime("%H:%M")
+        prompt = GREETING_SYSTEM_PROMPT.format(
+            current_time=current_time,
+            text=text,
+            sender_name=sender_name or "User",
+        )
+        try:
+            data = self._post_json(
+                f"{self.ollama_url}/api/chat",
+                {
+                    "model": self.fast_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                },
+                timeout=30,
+            )
+            message = data.get("message", {}).get("content", "").strip()
+            return message if message else "Hello! How can I help you?"
+        except Exception as e:
+            logger.error(f"Failed to generate greeting: {e}")
+            return "Hello! How can I help you?"
+
     def answer(self, question: str, sender_number: str, chat_jid: str, role: str = "user") -> RagResult:
         """Main RAG answer function."""
         start_time = time.time()
@@ -354,10 +400,9 @@ class RagEngine:
                     response_time_ms=elapsed_ms,
                 )
 
-            best_score = sources[0].score
             logger.info(
                 f"RAG found {len(sources)} source(s). "
-                f"Best score={best_score:.4f}, collection={sources[0].collection}"
+                f"Best score={sources[0].score:.4f}, collection={sources[0].collection}"
             )
 
             context = self._build_context(sources)
