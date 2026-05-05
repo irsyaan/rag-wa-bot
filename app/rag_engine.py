@@ -14,9 +14,10 @@ Flow:
 """
 
 import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import requests
 from loguru import logger
@@ -75,6 +76,10 @@ class RagEngine:
             self.knowledge_collection: 0.45,
             self.chat_collection: 0.55,
         }
+
+        # Per-sender rolling conversation buffer: last 3 (user, bot) pairs
+        # key: sender_number -> deque of (user_msg, bot_reply) tuples
+        self._history: Dict[str, Deque[Tuple[str, str]]] = defaultdict(lambda: deque(maxlen=3))
 
         # Important:
         # In proxy mode, global HTTP_PROXY/HTTPS_PROXY exists for WhatsApp.
@@ -223,6 +228,7 @@ class RagEngine:
         context: str,
         role: str,
         sender_name: str = "User",
+        recent_history: str = "",
     ) -> str:
         """Ask Ollama using retrieved context. Also handles greetings."""
         # Use configured timezone offset (default +7 for WIB)
@@ -248,6 +254,7 @@ class RagEngine:
             sender_name=sender_name or "User",
             role=role,
             context=context or "No context available.",
+            recent_history=recent_history or "(no recent conversation)",
         )
 
         prompt += f"\n\nMessage:\n{question}\n\nAnswer:"
@@ -343,6 +350,17 @@ class RagEngine:
 
         logger.info(f"RAG started for {sender_number}: {question}")
 
+        # Build recent conversation history string
+        history_deque = self._history[sender_number]
+        if history_deque:
+            history_lines = []
+            for user_msg, bot_reply in history_deque:
+                history_lines.append(f"User: {user_msg}")
+                history_lines.append(f"Bot: {bot_reply}")
+            recent_history = "\n".join(history_lines)
+        else:
+            recent_history = "(no recent conversation)"
+
         try:
             sources = self._search_all(question)
 
@@ -356,8 +374,11 @@ class RagEngine:
 
             context = self._build_context(sources)
             answer = self._ask_ollama(
-                question, context, role, sender_name=sender_name
+                question, context, role, sender_name=sender_name, recent_history=recent_history
             )
+
+            # Store this exchange in the rolling buffer
+            self._history[sender_number].append((question, answer))
 
             source_payloads = [
                 {
