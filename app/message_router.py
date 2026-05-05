@@ -203,6 +203,8 @@ class MessageRouter:
                 except Exception as e:
                     logger.exception(f"Failed to download/process PDF: {e}")
                     reply = f"❌ Failed to process document: {str(e)}"
+
+        else:
             # Send everything to RAG — the main model handles greetings too
             rag_result = rag_engine.answer(
                 question=text_stripped,
