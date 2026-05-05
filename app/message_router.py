@@ -277,20 +277,8 @@ class MessageRouter:
             reply = self._greeting_reply(text_stripped, sender_name)
             logger.info("Handled greeting directly without RAG/LLM")
 
-        elif (parsed_intent and parsed_intent.intent == "ip_lookup") or self._is_ip_lookup(text_stripped):
-            rag_result = rag_engine.answer_ip_lookup(
-                question=text_stripped,
-                sender_number=sender_number,
-                chat_jid=chat_jid,
-                parsed_intent=parsed_intent,
-            )
-            reply = rag_result.answer
-
-            if hasattr(rag_result, "sources"):
-                rag_sources = rag_result.sources
-
         else:
-            # Use LLM RAG only after deterministic handlers decline the message.
+            # Use LLM RAG for all non-greeting natural-language messages.
             rag_result = rag_engine.answer(
                 question=text_stripped,
                 sender_number=sender_number,

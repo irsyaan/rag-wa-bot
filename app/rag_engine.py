@@ -62,6 +62,7 @@ MIN_RAG_BEST_SCORE = 0.62
 IP_RELEVANCE_STOPWORDS = {
     "ada",
     "alamat",
+    "all",
     "apa",
     "apakah",
     "berapa",
@@ -86,6 +87,7 @@ IP_RELEVANCE_STOPWORDS = {
     "nya",
     "saja",
     "saya",
+    "semua",
     "server",
     "show",
     "the",
@@ -686,6 +688,75 @@ class RagEngine:
             or source.collection
         )
 
+    @staticmethod
+    def _is_all_ip_request(question: str, parsed_intent: Optional[ParsedIntent]) -> bool:
+        """Return True when the user asks for every IP, not a specific target."""
+        lowered = question.lower()
+        entity = (parsed_intent.entity if parsed_intent else "").strip().lower()
+        if entity in {"", "all", "all ip", "all ips", "semua", "semua ip"}:
+            return True
+        return any(phrase in lowered for phrase in ["all ip", "all ips", "semua ip", "list all ip"])
+
+    def _format_ip_matches_from_json(
+        self,
+        raw_text: str,
+        context: str,
+        question: str,
+        parsed_intent: Optional[ParsedIntent],
+    ) -> str:
+        """Validate structured LLM IP extraction and format WhatsApp-safe bullets."""
+        no_answer = (
+            NO_CONTEXT_REPLY_EN
+            if parsed_intent and parsed_intent.language == "en"
+            else NO_CONTEXT_REPLY
+        )
+        parsed = self._extract_json_object(raw_text)
+        if not parsed:
+            logger.warning(f"IP extractor returned non-JSON response: {raw_text[:160]}")
+            return no_answer
+
+        matches = parsed.get("matches")
+        if not isinstance(matches, list):
+            return no_answer
+
+        all_request = self._is_all_ip_request(question, parsed_intent)
+        target_terms = set()
+        if parsed_intent and parsed_intent.entity and not all_request:
+            target_terms = self._query_terms_from_entity(parsed_intent.entity)
+
+        context_lower = context.lower()
+        suffix = parsed_intent.suffix if parsed_intent else ""
+        lines = []
+        seen = set()
+
+        for item in matches:
+            if not isinstance(item, dict):
+                continue
+
+            ip = str(item.get("ip", "") or "").strip()
+            name = str(item.get("name", "") or "").strip()
+            evidence = str(item.get("evidence", "") or "").strip()
+
+            if not IP_PATTERN.fullmatch(ip):
+                continue
+            if ip not in context:
+                continue
+            if suffix and ip.rsplit(".", 1)[-1] != suffix:
+                continue
+            if not evidence or ip not in evidence or evidence.lower() not in context_lower:
+                continue
+            if target_terms and not any(term in evidence.lower() for term in target_terms):
+                continue
+
+            label = name if name else "Unknown"
+            key = (ip, label)
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"- {ip} - {label}")
+
+        return "\n".join(lines) if lines else no_answer
+
     def _ask_ollama_ip_lookup(
         self,
         question: str,
@@ -694,9 +765,14 @@ class RagEngine:
     ) -> Tuple[str, int]:
         """Use the LLM to extract hostname/IP pairs from retrieved context only."""
         language = parsed_intent.language if parsed_intent else "id"
-        no_answer = NO_CONTEXT_REPLY_EN if language == "en" else NO_CONTEXT_REPLY
         entity = parsed_intent.entity if parsed_intent else ""
         suffix = parsed_intent.suffix if parsed_intent else ""
+        all_request = self._is_all_ip_request(question, parsed_intent)
+        target_rule = (
+            "This is an all-IP request, so include every IP row present in Context."
+            if all_request
+            else "This is a targeted request. Include only matches whose evidence explicitly mentions the parsed target."
+        )
 
         prompt = f"""You extract IP information from retrieved IT document context.
 
@@ -704,12 +780,12 @@ Rules:
 - Answer ONLY from Context.
 - Do not use outside knowledge.
 - Do not invent IPs, hostnames, products, locations, or relationships.
-- Include only rows/facts that directly match the user's request.
-- If the user asks for a product/site/short name, use the Context to interpret it.
-- If a hostname/name is available near the IP, include it.
-- If no matching IP is in Context, reply exactly: {no_answer}
-- Output only bullet lines in this format:
-- IP - HOSTNAME_OR_NAME
+- {target_rule}
+- Each match must include a short evidence string copied from Context that contains the IP.
+- For targeted requests, the evidence must also contain the parsed target word.
+- If no matching IP is in Context, return {{"matches":[]}}.
+- Return ONLY JSON in this shape:
+{{"matches":[{{"ip":"172.22.255.38","name":"HOSTNAME_OR_NAME","evidence":"copied context text containing target and IP"}}]}}
 
 User message: {question}
 Parsed target: {entity or "(none)"}
@@ -733,12 +809,9 @@ Context:
             timeout=120,
         )
         llm_ms = int((time.time() - t0) * 1000)
-        answer = data.get("message", {}).get("content", "").strip()
-        answer = self._clean_model_answer(answer) if answer else no_answer
-
-        if answer not in {NO_CONTEXT_REPLY, NO_CONTEXT_REPLY_EN} and not IP_PATTERN.search(answer):
-            logger.warning(f"IP extractor returned answer without IP; forcing no-context: {answer[:120]}")
-            answer = no_answer
+        raw_answer = data.get("message", {}).get("content", "").strip()
+        raw_answer = self._clean_model_answer(raw_answer) if raw_answer else ""
+        answer = self._format_ip_matches_from_json(raw_answer, context, question, parsed_intent)
 
         return answer, llm_ms
 
