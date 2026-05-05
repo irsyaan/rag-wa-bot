@@ -48,6 +48,15 @@ OLLAMA_PARSE_OPTIONS = {
     "num_predict": 80,
 }
 
+OLLAMA_IP_EXTRACT_OPTIONS = {
+    "temperature": 0,
+    "top_p": 0.8,
+    "top_k": 20,
+    "repeat_penalty": 1.05,
+    "num_ctx": 2048,
+    "num_predict": 220,
+}
+
 IP_LOOKUP_SCORE_THRESHOLD = 0.45
 MIN_RAG_BEST_SCORE = 0.62
 IP_RELEVANCE_STOPWORDS = {
@@ -67,6 +76,7 @@ IP_RELEVANCE_STOPWORDS = {
     "give",
     "ip",
     "ipv4",
+    "is",
     "itu",
     "list",
     "lookup",
@@ -487,6 +497,26 @@ class RagEngine:
 
         return parsed if isinstance(parsed, dict) else None
 
+    @staticmethod
+    def _looks_like_greeting_typo(text: str) -> bool:
+        """Catch short stretched greeting typos after the fast parser has had first pass."""
+        normalized = re.sub(r"[^a-zA-Z]", "", (text or "").lower())
+        if not normalized or len(normalized) > 16:
+            return False
+
+        greeting_shapes = [
+            r"h+i+",
+            r"h+y+",
+            r"h+e+l+[oa]*w*",
+            r"h+a+l+[oa]*w*",
+            r"h+a+i+w*",
+            r"p+a+g+i+",
+            r"s+i+a+n+g+",
+            r"s+o+r+e+",
+            r"m+a+l+a+m+",
+        ]
+        return any(re.fullmatch(pattern, normalized) for pattern in greeting_shapes)
+
     def parse_message_intent(self, text: str) -> ParsedIntent:
         """
         Use the fast model only as an intent/entity parser.
@@ -502,7 +532,7 @@ class RagEngine:
             "Return ONLY compact JSON with keys: intent, entity, suffix, language. "
             "intent must be one of: greeting, ip_lookup, other. "
             "Treat greeting typos and casual variants as greeting, for example "
-            "helo, heloo, hy, haii, hallo, halo, pagi, siang, sore, malam. "
+            "helo, heloo, hy, haii, hallaww, hellaww, hallo, halo, pagi, siang, sore, malam. "
             "For ip_lookup, entity is the target system/location/device only, "
             "without filler words like gw, lupa, berapa, brp, ini, sih. "
             "suffix is only the last IP octet if the user asks by suffix, otherwise empty. "
@@ -531,6 +561,8 @@ class RagEngine:
                 intent = str(parsed.get("intent", "unknown")).strip().lower()
                 if intent not in {"greeting", "ip_lookup", "other"}:
                     intent = "unknown"
+                if intent in {"unknown", "other"} and self._looks_like_greeting_typo(text):
+                    intent = "greeting"
 
                 entity = str(parsed.get("entity", "") or "").strip().lower()
                 suffix = str(parsed.get("suffix", "") or "").strip().lstrip(".")
@@ -550,6 +582,9 @@ class RagEngine:
 
         except Exception as e:
             logger.warning(f"Fast intent parser failed, using fallback parser: {e}")
+
+        if self._looks_like_greeting_typo(text):
+            return ParsedIntent(intent="greeting", language="id", used_llm=False)
 
         return self._fallback_parse_message_intent(text)
 
@@ -651,6 +686,62 @@ class RagEngine:
             or source.collection
         )
 
+    def _ask_ollama_ip_lookup(
+        self,
+        question: str,
+        context: str,
+        parsed_intent: Optional[ParsedIntent] = None,
+    ) -> Tuple[str, int]:
+        """Use the LLM to extract hostname/IP pairs from retrieved context only."""
+        language = parsed_intent.language if parsed_intent else "id"
+        no_answer = NO_CONTEXT_REPLY_EN if language == "en" else NO_CONTEXT_REPLY
+        entity = parsed_intent.entity if parsed_intent else ""
+        suffix = parsed_intent.suffix if parsed_intent else ""
+
+        prompt = f"""You extract IP information from retrieved IT document context.
+
+Rules:
+- Answer ONLY from Context.
+- Do not use outside knowledge.
+- Do not invent IPs, hostnames, products, locations, or relationships.
+- Include only rows/facts that directly match the user's request.
+- If the user asks for a product/site/short name, use the Context to interpret it.
+- If a hostname/name is available near the IP, include it.
+- If no matching IP is in Context, reply exactly: {no_answer}
+- Output only bullet lines in this format:
+- IP - HOSTNAME_OR_NAME
+
+User message: {question}
+Parsed target: {entity or "(none)"}
+Parsed suffix: {suffix or "(none)"}
+
+Context:
+{context}
+"""
+
+        t0 = time.time()
+        data = self._post_json(
+            f"{self.ollama_url}/api/chat",
+            {
+                "model": self.main_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "think": False,
+                "stream": False,
+                "keep_alive": "10m",
+                "options": OLLAMA_IP_EXTRACT_OPTIONS,
+            },
+            timeout=120,
+        )
+        llm_ms = int((time.time() - t0) * 1000)
+        answer = data.get("message", {}).get("content", "").strip()
+        answer = self._clean_model_answer(answer) if answer else no_answer
+
+        if answer not in {NO_CONTEXT_REPLY, NO_CONTEXT_REPLY_EN} and not IP_PATTERN.search(answer):
+            logger.warning(f"IP extractor returned answer without IP; forcing no-context: {answer[:120]}")
+            answer = no_answer
+
+        return answer, llm_ms
+
     def answer_ip_lookup(
         self,
         question: str,
@@ -658,14 +749,16 @@ class RagEngine:
         chat_jid: str,
         parsed_intent: Optional[ParsedIntent] = None,
     ) -> RagResult:
-        """Answer IP lookups deterministically from retrieved snippets without LLM generation."""
+        """Answer IP lookups by retrieving context, then asking LLM to extract IP rows."""
         start_time = time.time()
         question = question.strip()
         logger.info(f"Direct IP lookup started for {sender_number}: {question}")
 
         try:
             parsed_intent = parsed_intent or self._fallback_parse_message_intent(question)
-            search_text = parsed_intent.entity or question
+            search_text = question
+            if parsed_intent.entity and parsed_intent.entity not in search_text.lower():
+                search_text = f"{question} {parsed_intent.entity}"
             if parsed_intent.suffix and parsed_intent.suffix not in search_text:
                 search_text = f"{search_text} {parsed_intent.suffix}".strip()
 
@@ -674,50 +767,14 @@ class RagEngine:
                 threshold=IP_LOOKUP_SCORE_THRESHOLD,
                 limit=max(self.max_results, 8),
             )
-            query_terms = self._query_terms_from_entity(parsed_intent.entity)
-            if not query_terms:
-                query_terms = self._query_terms_for_ip(question)
-            suffixes = {parsed_intent.suffix} if parsed_intent.suffix else self._requested_ip_suffixes(question)
-            matches = []
 
-            for source in sources:
-                text = source.text
-                ips = IP_PATTERN.findall(text)
-                if not ips:
-                    continue
-
-                for ip in ips:
-                    if suffixes and ip.rsplit(".", 1)[-1] not in suffixes:
-                        continue
-                    ip_context = self._ip_context(text, ip)
-                    label = self._label_from_text(ip_context) or self._source_label(source)
-                    context_lower = ip_context.lower()
-                    label_lower = label.lower()
-                    has_term_match = not query_terms or any(
-                        term in context_lower or term in label_lower for term in query_terms
-                    )
-                    if not has_term_match:
-                        continue
-                    matches.append((ip, label, source))
-
-            seen = set()
-            lines = []
-            matched_sources = []
-            for ip, label, source in matches:
-                key = (ip, label)
-                if key in seen:
-                    continue
-                seen.add(key)
-                lines.append(f"- {ip} - {label}")
-                matched_sources.append(source)
-
-            total_ms = int((time.time() - start_time) * 1000)
-
-            if not lines:
+            sources_with_ip = [source for source in sources if IP_PATTERN.search(source.text)]
+            if not sources_with_ip:
+                total_ms = int((time.time() - start_time) * 1000)
                 best_score = sources[0].score if sources else None
                 self._log_failed_question(sender_number, chat_jid, question, best_score)
                 logger.info(
-                    f"Direct IP lookup found no precise match. "
+                    f"IP lookup found no retrieved source containing an IP. "
                     f"embed={embed_ms}ms, search={search_ms}ms, total={total_ms}ms"
                 )
                 return RagResult(
@@ -725,6 +782,14 @@ class RagEngine:
                     sources=[],
                     response_time_ms=total_ms,
                 )
+
+            context = self._build_context(sources_with_ip)
+            answer, llm_ms = self._ask_ollama_ip_lookup(question, context, parsed_intent)
+            total_ms = int((time.time() - start_time) * 1000)
+
+            if answer in {NO_CONTEXT_REPLY, NO_CONTEXT_REPLY_EN}:
+                best_score = sources[0].score if sources else None
+                self._log_failed_question(sender_number, chat_jid, question, best_score)
 
             source_payloads = [
                 {
@@ -734,15 +799,15 @@ class RagEngine:
                     "source": self._source_label(source),
                     "text": source.text[:500],
                 }
-                for source in matched_sources
+                for source in sources_with_ip
             ]
 
             logger.info(
-                f"Direct IP lookup answered with {len(lines)} match(es). "
-                f"embed={embed_ms}ms, search={search_ms}ms, total={total_ms}ms"
+                f"LLM IP lookup finished. embed={embed_ms}ms, search={search_ms}ms, "
+                f"llm={llm_ms}ms, total={total_ms}ms"
             )
             return RagResult(
-                answer="\n".join(lines),
+                answer=answer,
                 sources=source_payloads,
                 response_time_ms=total_ms,
             )

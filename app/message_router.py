@@ -42,10 +42,13 @@ class MessageRouter:
         """Return True only for clear greetings that do not need the parser."""
         return bool(self._GREETING_RE.match(text or ""))
 
-    def _greeting_reply(self, text: str, sender_name: Optional[str]) -> str:
+    def _greeting_reply(self, text: str, sender_name: Optional[str], language: Optional[str] = None) -> str:
         """Fast deterministic greeting reply."""
         lowered = (text or "").lower()
         name = sender_name or "there"
+
+        if language == "id":
+            return f"Halo {name}, ada yang bisa saya bantu?"
 
         if any(word in lowered for word in ["pagi", "siang", "sore", "malam", "halo", "hallo", "hai"]):
             return f"Halo {name}, ada yang bisa saya bantu?"
@@ -267,7 +270,7 @@ class MessageRouter:
             pass
 
         elif parsed_intent and parsed_intent.intent == "greeting":
-            reply = self._greeting_reply(text_stripped, sender_name)
+            reply = self._greeting_reply(text_stripped, sender_name, parsed_intent.language)
             logger.info("Handled parsed greeting directly without RAG/LLM answer generation")
 
         elif self._is_greeting(text_stripped):
