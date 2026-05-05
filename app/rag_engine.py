@@ -23,7 +23,7 @@ from loguru import logger
 
 from app.config import settings
 from app.mysql_store import mysql_store
-from app.prompts import RAG_SYSTEM_PROMPT, CLASSIFY_SYSTEM_PROMPT, GREETING_SYSTEM_PROMPT
+from app.prompts import RAG_SYSTEM_PROMPT, CLASSIFY_AND_RESPOND_PROMPT
 
 
 @dataclass
@@ -327,64 +327,55 @@ class RagEngine:
         "p", "yo", "oi", "woi", "hei",
     }
 
-    def _is_greeting_fallback(self, text: str) -> bool:
-        """Simple keyword check used as fallback when LLM classification fails."""
-        words = text.strip().lower().split()
-        return len(words) <= 3 and bool(self._GREETING_KEYWORDS.intersection(words))
-
-    def classify_message(self, text: str) -> str:
-        """Use the fast model to classify the user's intent."""
-        prompt = f"{CLASSIFY_SYSTEM_PROMPT}\n\nMessage: {text}"
-        try:
-            data = self._post_json(
-                f"{self.ollama_url}/api/chat",
-                {
-                    "model": self.fast_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                },
-                timeout=30,  # increased from 10s
-            )
-            message = data.get("message", {}).get("content", "").strip().lower()
-
-            for category in ["greeting", "question", "command", "chitchat", "unclear"]:
-                if category in message:
-                    return category
-
-            return "unclear"
-        except Exception as e:
-            logger.warning(f"LLM classification failed, using keyword fallback: {e}")
-            # Fallback: check simple keywords so greetings still work
-            if self._is_greeting_fallback(text):
-                return "greeting"
-            return "unclear"
-
-    def generate_greeting(self, text: str, sender_name: str = "User") -> str:
-        """Generate a time-aware greeting response using the fast model."""
+    def classify_and_respond(self, text: str, sender_name: str = "User") -> tuple[str, str | None]:
+        """
+        Classify the message AND generate a greeting in ONE LLM call.
+        
+        Returns:
+            (category, response) — response is only set for greetings.
+        """
         now = datetime.now()
         current_time = now.strftime("%H:%M")
-        hour = now.hour
-        
-        prompt = GREETING_SYSTEM_PROMPT.format(
+
+        prompt = CLASSIFY_AND_RESPOND_PROMPT.format(
             current_time=current_time,
-            text=text,
             sender_name=sender_name or "User",
         )
+
         try:
             data = self._post_json(
                 f"{self.ollama_url}/api/chat",
                 {
                     "model": self.fast_model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": text},
+                    ],
                     "stream": False,
+                    "keep_alive": "10m",  # keep model loaded for 10 minutes
                 },
-                timeout=30,
+                timeout=60,
             )
-            message = data.get("message", {}).get("content", "").strip()
-            return message if message else self._fallback_greeting(sender_name, hour)
+            reply = data.get("message", {}).get("content", "").strip()
+            logger.info(f"LLM classify response: {reply}")
+
+            if reply.upper().startswith("GREETING:"):
+                greeting_text = reply[len("GREETING:"):].strip()
+                return ("greeting", greeting_text)
+            elif "QUESTION" in reply.upper():
+                return ("question", None)
+            elif "CHITCHAT" in reply.upper():
+                return ("chitchat", None)
+            else:
+                return ("unclear", None)
+
         except Exception as e:
-            logger.warning(f"LLM greeting failed, using fallback: {e}")
-            return self._fallback_greeting(sender_name, hour)
+            logger.warning(f"LLM classify_and_respond failed: {e}")
+            # Fallback: keyword check for greetings
+            words = text.strip().lower().split()
+            if len(words) <= 3 and self._GREETING_KEYWORDS.intersection(words):
+                return ("greeting", self._fallback_greeting(sender_name, now.hour))
+            return ("unclear", None)
 
     def _fallback_greeting(self, sender_name: str, hour: int) -> str:
         """Build a greeting from Python without needing the LLM."""

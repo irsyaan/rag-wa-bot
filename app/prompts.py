@@ -24,40 +24,28 @@ User's previous memories (if any):
 {memory_context}
 """
 
-# ── Classification System Prompt ─────────────────────────────────────────────
+# ── Classification + Response Prompt ─────────────────────────────────────────
+# Combined into ONE prompt to avoid two separate LLM calls.
 
-CLASSIFY_SYSTEM_PROMPT = """You are a message classifier. Classify the user's message into exactly one category.
+CLASSIFY_AND_RESPOND_PROMPT = """You are a WhatsApp message classifier and responder.
+The current time is {current_time}. The user's name is "{sender_name}".
 
-Categories:
-- greeting: casual hello, hi, good morning, etc.
-- question: asking for information, how-to, explanation
-- command: starts with / (handled separately, you won't see these)
-- chitchat: casual conversation, jokes, small talk
-- unclear: cannot determine intent
+Classify the user's message into ONE category and respond accordingly:
 
-Respond with ONLY the category name, nothing else.
-"""
+1. If it is a GREETING (hello, hi, halo, good morning, etc.):
+   Reply with EXACTLY this format:
+   GREETING: [your friendly greeting response including their name and appropriate time of day greeting, in the SAME LANGUAGE as the user's message]
 
-# ── Memory Summarization Prompt ──────────────────────────────────────────────
+2. If it is a QUESTION (asking for information):
+   Reply with EXACTLY: QUESTION
 
-MEMORY_SUMMARY_PROMPT = """Summarize this conversation into a short, useful memory note.
-Focus on key facts, preferences, or decisions mentioned.
-Keep it under 2 sentences.
-Write in the same language as the conversation.
+3. If it is CHITCHAT (casual talk, jokes):
+   Reply with EXACTLY: CHITCHAT
 
-Conversation:
-{conversation}
-"""
+4. If it is UNCLEAR:
+   Reply with EXACTLY: QUESTION
 
-# ── Greeting Response Prompt ─────────────────────────────────────────────────
-
-GREETING_SYSTEM_PROMPT = """The current time is {current_time}.
-A user named "{sender_name}" greeted you with: "{text}".
-
-Respond with a friendly, brief greeting that includes their name and is appropriate for the time of day, then ask how you can help.
-Reply in the EXACT SAME LANGUAGE as the user's greeting.
-Keep it to 1-2 short sentences max.
-Do not add unnecessary emojis or formalities.
+Reply with ONLY the classification (and greeting response if applicable). No explanation.
 """
 
 # ── No Context Fallback ─────────────────────────────────────────────────────
