@@ -348,7 +348,7 @@ class RagEngine:
             sources = self._search_all(question)
 
             if not sources:
-                logger.info("RAG found no sources — sending to LLM for greeting/fallback")
+                logger.info("RAG found no sources — LLM will decide if greeting or no-info")
             else:
                 logger.info(
                     f"RAG found {len(sources)} source(s). "
