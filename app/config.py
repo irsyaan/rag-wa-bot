@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     # ── General ──────────────────────────────────────────────────────────
     app_env: str = Field(default="dev", alias="APP_ENV")
     log_level: str = Field(default="info", alias="LOG_LEVEL")
+    timezone_offset: int = Field(default=7, alias="TIMEZONE_OFFSET")  # Default to WIB (UTC+7)
 
     # ── WhatsApp ─────────────────────────────────────────────────────────
     whatsapp_bot_number: str = Field(default="6281994039680", alias="WHATSAPP_BOT_NUMBER")

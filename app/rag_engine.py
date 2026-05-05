@@ -14,7 +14,7 @@ Flow:
 """
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -242,7 +242,9 @@ class RagEngine:
         sender_name: str = "User",
     ) -> str:
         """Ask Ollama using retrieved context. Also handles greetings."""
-        now = datetime.now()
+        # Use configured timezone offset (default +7 for WIB)
+        tz = timezone(timedelta(hours=settings.timezone_offset))
+        now = datetime.now(tz)
         current_time = now.strftime("%H:%M")
         hour = now.hour
 
@@ -252,8 +254,10 @@ class RagEngine:
             time_period = "afternoon (siang)"
         elif 15 <= hour < 18:
             time_period = "afternoon (sore)"
-        else:
+        elif 18 <= hour < 21:
             time_period = "evening (malam)"
+        else:
+            time_period = "night (malam)"
 
         prompt = RAG_SYSTEM_PROMPT.format(
             current_time=current_time,
