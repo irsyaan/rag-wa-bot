@@ -72,13 +72,26 @@ class MessageRouter:
 
         # Step 2: Group logic
         bot_jid = f"{settings.whatsapp_bot_number}@s.whatsapp.net"
+        bot_number = settings.whatsapp_bot_number
         reply_chat_jid = chat_jid
 
         if is_group:
             mentioned_jids = mentioned_jids or []
+            
+            # Resolve mentioned JIDs to phone numbers (to handle @lid mentions)
+            resolved_mentions = [
+                whatsapp_client._resolve_phone_number(jid) 
+                for jid in mentioned_jids
+            ]
 
-            if bot_jid not in mentioned_jids:
-                logger.debug("Ignoring group message because bot was not mentioned")
+            is_mentioned = (
+                bot_jid in mentioned_jids or 
+                bot_number in resolved_mentions or
+                (whatsapp_client.bot_jid and whatsapp_client.bot_jid in mentioned_jids)
+            )
+
+            if not is_mentioned:
+                logger.debug(f"Ignoring group message because bot was not mentioned. Mentions: {mentioned_jids}, Resolved: {resolved_mentions}")
                 return
 
             # If tagged in group, reply personally to sender
