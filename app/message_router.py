@@ -96,9 +96,20 @@ class MessageRouter:
                 logger.debug(f"Ignoring group message because bot was not mentioned. Mentions: {mentioned_jids}, Resolved: {resolved_mentions}")
                 return
 
-            # If tagged in group, reply in the group by default
-            # (unless it's an admin command, which we will handle below)
-            logger.info(f"Bot tagged in group, processing message from {sender_number}")
+            # If tagged in group, strip the mentions to get the clean command/question
+            # We remove both @number and @name tags if possible
+            text_stripped = text
+            for jid in mentioned_jids:
+                if jid in [bot_jid, whatsapp_client.bot_jid]:
+                    # Remove the @jid part (neonize often passes it as @number in the text)
+                    prefix = jid.split('@')[0]
+                    text_stripped = text_stripped.replace(f"@{prefix}", "").strip()
+            
+            # Fallback: if there are still any @ mention patterns, clean them up
+            import re
+            text_stripped = re.sub(r'@[0-9]+', '', text_stripped).strip()
+
+            logger.info(f"Bot tagged in group, processing cleaned message: '{text_stripped}'")
 
         # Step 3: Route message
         if text_stripped.lower() == "/help":
