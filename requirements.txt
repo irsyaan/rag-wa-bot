@@ -22,3 +22,6 @@ apscheduler==3.10.4
 # Optional API/healthcheck layer
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+
+numpy==2.2.6
+socksio==1.0.0

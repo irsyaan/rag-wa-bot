@@ -1,0 +1,13 @@
+services:
+  personal-wa-assistant:
+    image: personal-wa-assistant:local
+    container_name: personal-wa-assistant
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env.proxy
+    volumes:
+      - /srv/rag/personal/neonize-session:/srv/rag/personal/neonize-session
+      - /srv/rag/personal/uploads:/srv/rag/personal/uploads
+      - /srv/rag/personal/processed:/srv/rag/personal/processed
+      - /srv/rag/personal/logs:/srv/rag/personal/logs
