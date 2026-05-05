@@ -24,6 +24,7 @@ from loguru import logger
 from app.config import settings
 from app.mysql_store import mysql_store
 from app.prompts import RAG_SYSTEM_PROMPT
+from app.qdrant_store import qdrant_store
 
 
 @dataclass
