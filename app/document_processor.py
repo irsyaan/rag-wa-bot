@@ -92,7 +92,7 @@ class DocumentProcessor:
                 )
 
             # Mark as done
-            mysql_store.update_document_status(doc_id, "done", len(chunks))
+            mysql_store.update_document_status(doc_id, "processed", len(chunks))
             
             # Clean up uploaded file
             try:

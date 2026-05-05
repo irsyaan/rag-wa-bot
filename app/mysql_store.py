@@ -333,6 +333,38 @@ class MySQLStore:
         finally:
             conn.close()
 
+    def list_documents(self) -> list[dict]:
+        """List all successfully processed documents."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            # Only list active documents
+            cursor.execute(
+                "SELECT id, filename, chunk_count, created_at FROM documents WHERE status = 'processed' ORDER BY created_at DESC"
+            )
+            return cursor.fetchall()
+        except MySQLError as e:
+            logger.error(f"Failed to list documents: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_document_by_name(self, filename: str) -> Optional[dict]:
+        """Get document details by filename."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                "SELECT id, filename, status FROM documents WHERE filename = %s AND status != 'deleted' LIMIT 1",
+                (filename,),
+            )
+            return cursor.fetchone()
+        except MySQLError as e:
+            logger.error(f"Failed to fetch document by name {filename}: {e}")
+            return None
+        finally:
+            conn.close()
+
 
 # Singleton instance
 mysql_store = MySQLStore()

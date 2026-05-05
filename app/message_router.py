@@ -171,6 +171,16 @@ class MessageRouter:
                 else:
                     reply = f"❌ Failed to delete document '{filename}' or it was not found."
 
+        elif text_stripped.lower() == "/listdocs":
+            docs = mysql_store.list_documents()
+            if not docs:
+                reply = "📂 No documents found in the knowledge base."
+            else:
+                lines = ["📂 *Knowledge Base Documents:*"]
+                for doc in docs:
+                    lines.append(f"- {doc['filename']} ({doc['chunk_count']} chunks)")
+                reply = "\n".join(lines)
+
         elif document_msg:
             # Handle PDF uploads
             if is_group:
@@ -180,8 +190,15 @@ class MessageRouter:
             elif document_msg.mimetype != "application/pdf":
                 reply = "⚠️ Only PDF documents are supported for upload."
             else:
-                # Tell the user we're processing
-                whatsapp_client.send_reply(reply_chat_jid, f"⏳ Downloading and processing '{document_msg.fileName}'...")
+                filename = document_msg.fileName or "uploaded.pdf"
+                
+                # Check for duplicate filename
+                existing_doc = mysql_store.get_document_by_name(filename)
+                if existing_doc:
+                    reply = f"⚠️ A document with the name '{filename}' already exists. Please delete it using `/forgetdoc {filename}` before uploading again."
+                else:
+                    # Tell the user we're processing
+                    whatsapp_client.send_reply(reply_chat_jid, f"⏳ Downloading and processing '{filename}'...")
                 
                 # Download
                 try:
