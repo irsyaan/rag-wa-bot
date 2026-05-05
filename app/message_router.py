@@ -145,25 +145,18 @@ class MessageRouter:
                 reply = result.message
 
         else:
-            # Classify the message first (ONE LLM call handles both classification + greeting)
-            category, greeting_reply = rag_engine.classify_and_respond(text_stripped, sender_name=sender_name)
-            logger.info(f"Message classified as: {category}")
+            # Send everything to RAG — the main model handles greetings too
+            rag_result = rag_engine.answer(
+                question=text_stripped,
+                sender_number=sender_number,
+                chat_jid=chat_jid,
+                role=role,
+                sender_name=sender_name,
+            )
+            reply = rag_result.answer
 
-            if category == "greeting" and greeting_reply:
-                reply = greeting_reply
-                logger.info(f"Greeting detected, replied with: {reply[:80]}")
-            else:
-                # It's a question/chitchat/unclear — use RAG
-                rag_result = rag_engine.answer(
-                    question=text_stripped,
-                    sender_number=sender_number,
-                    chat_jid=chat_jid,
-                    role=role,
-                )
-                reply = rag_result.answer
-
-                if hasattr(rag_result, "sources"):
-                    rag_sources = rag_result.sources
+            if hasattr(rag_result, "sources"):
+                rag_sources = rag_result.sources
 
         # Step 4: Send reply
         if reply:

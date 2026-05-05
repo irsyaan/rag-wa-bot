@@ -23,7 +23,7 @@ from loguru import logger
 
 from app.config import settings
 from app.mysql_store import mysql_store
-from app.prompts import RAG_SYSTEM_PROMPT, CLASSIFY_AND_RESPOND_PROMPT
+from app.prompts import RAG_SYSTEM_PROMPT
 
 
 @dataclass
@@ -93,6 +93,7 @@ class RagEngine:
             {
                 "model": self.embedding_model,
                 "input": text,
+                "keep_alive": "10m",
             },
             timeout=120,
         )
@@ -233,17 +234,24 @@ class RagEngine:
 
         return "\n\n---\n\n".join(blocks)
 
-    def _ask_ollama(self, question: str, context: str, role: str) -> str:
-        """Ask Ollama using retrieved context only."""
-        # Use centralized prompt from prompts.py
+    def _ask_ollama(
+        self,
+        question: str,
+        context: str,
+        role: str,
+        sender_name: str = "User",
+    ) -> str:
+        """Ask Ollama using retrieved context. Also handles greetings."""
+        current_time = datetime.now().strftime("%H:%M")
+
         prompt = RAG_SYSTEM_PROMPT.format(
+            current_time=current_time,
+            sender_name=sender_name or "User",
             role=role,
-            context=context or "No specific context found.",
-            memory_context="",
+            context=context or "No context available.",
         )
-        
-        # Add the actual question as the final message
-        prompt += f"\n\nQuestion:\n{question}\n\nAnswer:"
+
+        prompt += f"\n\nMessage:\n{question}\n\nAnswer:"
 
         data = self._post_json(
             f"{self.ollama_url}/api/chat",
@@ -257,6 +265,7 @@ class RagEngine:
                 ],
                 "think": False,
                 "stream": False,
+                "keep_alive": "10m",
             },
             timeout=180,
         )
@@ -321,77 +330,15 @@ class RagEngine:
             logger.error(f"Failed to translate rejection message: {e}")
             return "You don't have the permission to do this."
 
-    # Minimal fallback keyword set used ONLY when LLM classification fails
-    _GREETING_KEYWORDS = {
-        "hi", "hii", "hiii", "hello", "helo", "halo", "hai", "hey", "heey",
-        "p", "yo", "oi", "woi", "hei",
-    }
-
-    def classify_and_respond(self, text: str, sender_name: str = "User") -> tuple[str, str | None]:
-        """
-        Classify the message AND generate a greeting in ONE LLM call.
-        
-        Returns:
-            (category, response) — response is only set for greetings.
-        """
-        now = datetime.now()
-        current_time = now.strftime("%H:%M")
-
-        prompt = CLASSIFY_AND_RESPOND_PROMPT.format(
-            current_time=current_time,
-            sender_name=sender_name or "User",
-        )
-
-        try:
-            data = self._post_json(
-                f"{self.ollama_url}/api/chat",
-                {
-                    "model": self.fast_model,
-                    "messages": [
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": text},
-                    ],
-                    "stream": False,
-                    "keep_alive": "10m",  # keep model loaded for 10 minutes
-                },
-                timeout=60,
-            )
-            reply = data.get("message", {}).get("content", "").strip()
-            logger.info(f"LLM classify response: {reply}")
-
-            if reply.upper().startswith("GREETING:"):
-                greeting_text = reply[len("GREETING:"):].strip()
-                return ("greeting", greeting_text)
-            elif "QUESTION" in reply.upper():
-                return ("question", None)
-            elif "CHITCHAT" in reply.upper():
-                return ("chitchat", None)
-            else:
-                return ("unclear", None)
-
-        except Exception as e:
-            logger.warning(f"LLM classify_and_respond failed: {e}")
-            # Fallback: keyword check for greetings
-            words = text.strip().lower().split()
-            if len(words) <= 3 and self._GREETING_KEYWORDS.intersection(words):
-                return ("greeting", self._fallback_greeting(sender_name, now.hour))
-            return ("unclear", None)
-
-    def _fallback_greeting(self, sender_name: str, hour: int) -> str:
-        """Build a greeting from Python without needing the LLM."""
-        name = sender_name or "there"
-        if 5 <= hour < 12:
-            period = "Good morning"
-        elif 12 <= hour < 17:
-            period = "Good afternoon"
-        elif 17 <= hour < 21:
-            period = "Good evening"
-        else:
-            period = "Good evening"
-        return f"{period}, {name}! How can I help you?"
-
-    def answer(self, question: str, sender_number: str, chat_jid: str, role: str = "user") -> RagResult:
-        """Main RAG answer function."""
+    def answer(
+        self,
+        question: str,
+        sender_number: str,
+        chat_jid: str,
+        role: str = "user",
+        sender_name: str = "User",
+    ) -> RagResult:
+        """Main RAG answer function. Also handles greetings via the prompt."""
         start_time = time.time()
         question = question.strip()
 
@@ -401,33 +348,17 @@ class RagEngine:
             sources = self._search_all(question)
 
             if not sources:
-                elapsed_ms = int((time.time() - start_time) * 1000)
-
-                self._log_failed_question(
-                    sender_number=sender_number,
-                    chat_jid=chat_jid,
-                    question=question,
-                    best_score=None,
+                logger.info("RAG found no sources — sending to LLM for greeting/fallback")
+            else:
+                logger.info(
+                    f"RAG found {len(sources)} source(s). "
+                    f"Best score={sources[0].score:.4f}, collection={sources[0].collection}"
                 )
-
-                logger.info(f"RAG found no usable sources. Finished in {elapsed_ms} ms")
-
-                return RagResult(
-                    answer=(
-                        "Maaf, saya belum memiliki informasi yang cukup untuk menjawab pertanyaan ini. "
-                        "Pertanyaan ini sudah dicatat untuk ditinjau nanti."
-                    ),
-                    sources=[],
-                    response_time_ms=elapsed_ms,
-                )
-
-            logger.info(
-                f"RAG found {len(sources)} source(s). "
-                f"Best score={sources[0].score:.4f}, collection={sources[0].collection}"
-            )
 
             context = self._build_context(sources)
-            answer = self._ask_ollama(question, context, role)
+            answer = self._ask_ollama(
+                question, context, role, sender_name=sender_name
+            )
 
             source_payloads = [
                 {
