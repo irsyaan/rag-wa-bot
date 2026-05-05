@@ -365,6 +365,28 @@ class MySQLStore:
         finally:
             conn.close()
 
+    def delete_documents_by_name(self, filename: str) -> int:
+        """
+        Delete all document records with this filename.
+
+        document_chunks rows are removed by the foreign-key ON DELETE CASCADE.
+        Returns the number of document rows deleted.
+        """
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM documents WHERE filename = %s",
+                (filename,),
+            )
+            conn.commit()
+            return cursor.rowcount
+        except MySQLError as e:
+            logger.error(f"Failed to delete documents by name {filename}: {e}")
+            return 0
+        finally:
+            conn.close()
+
 
 # Singleton instance
 mysql_store = MySQLStore()

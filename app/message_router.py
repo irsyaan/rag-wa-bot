@@ -184,6 +184,26 @@ class MessageRouter:
                     logger.info(f"Admin command used in group, replying personally to {sender_number}")
                 reply = result.message
 
+        elif text_stripped.lower().startswith(("/forgetdoc ", "/forgetdocs ")):
+            if role not in ["admin", "owner"]:
+                reply = rag_engine.get_rejection_message(text_stripped)
+            else:
+                _, _, filename = text_stripped.partition(" ")
+                filename = filename.strip()
+                qdrant_deleted = qdrant_store.delete_by_filter(
+                    settings.qdrant_knowledge_collection, "filename", filename
+                )
+                mysql_deleted = mysql_store.delete_documents_by_name(filename)
+
+                if qdrant_deleted or mysql_deleted:
+                    reply = (
+                        f"✅ Deleted document '{filename}'.\n"
+                        f"- Qdrant context delete: {'ok' if qdrant_deleted else 'not found/failed'}\n"
+                        f"- MySQL document rows deleted: {mysql_deleted}"
+                    )
+                else:
+                    reply = f"❌ Document '{filename}' was not found or could not be deleted."
+
         elif memory_manager.is_memory_command(text_stripped):
             # Restrict /remember and /forget to admin/owner
             is_write_cmd = text_stripped.lower().startswith(("/remember", "/forget"))
@@ -193,19 +213,6 @@ class MessageRouter:
             else:
                 result = memory_manager.handle_command(text_stripped, sender_number)
                 reply = result.message
-
-        elif text_stripped.lower().startswith("/forgetdoc "):
-            if role not in ["admin", "owner"]:
-                reply = rag_engine.get_rejection_message(text_stripped)
-            else:
-                filename = text_stripped[11:].strip()
-                deleted = qdrant_store.delete_by_filter(
-                    settings.qdrant_knowledge_collection, "filename", filename
-                )
-                if deleted:
-                    reply = f"✅ Deleted all knowledge chunks for document '{filename}' from vector database."
-                else:
-                    reply = f"❌ Failed to delete document '{filename}' or it was not found."
 
         elif text_stripped.lower() == "/listdocs":
             docs = mysql_store.list_documents()
