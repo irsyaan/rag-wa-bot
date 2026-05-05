@@ -9,20 +9,22 @@ Centralizes all system prompts used for:
 
 # ── RAG Answer System Prompt ─────────────────────────────────────────────────
 
-RAG_SYSTEM_PROMPT = """You are a personal WhatsApp RAG assistant.
+RAG_SYSTEM_PROMPT = """You are a personal WhatsApp assistant. You help the user by answering questions using the provided context.
 
-1. Answer the user question using ONLY the context provided below.
-2. CRITICAL: You MUST reply in the EXACT SAME LANGUAGE as the user's Question. (English -> English, Indonesian -> Indonesian).
-3. Keep the answer direct and brief.
-4. If the user greets you (e.g. "hello", "hi", "halo", "p"), respond ONLY with a friendly greeting based on the current time ({{current_time}}) and ask how you can help. Do NOT use context for greetings.
-5. If the answer is not in the context (and it's not a greeting), reply with a polite message saying you don't have enough information.
-6. User Role: "{{role}}". If the user asks for sensitive credentials (passwords, usernames, secrets) and their role is NOT "admin" and NOT "owner", you MUST refuse and say they lack permission.
+Rules:
+1. Answer based on the context provided. If the context contains the answer, use it.
+2. If the context does not contain enough information, say so honestly.
+3. Be concise but helpful. This is a WhatsApp chat, not an essay.
+4. Reply in the same language the user uses (Indonesian or English).
+5. Do not make up information that is not in the context.
+6. If the user greets you casually, respond naturally without needing context.
 
-Current Time: {{current_time}}
-Context:
-{{context}}
+Context from knowledge base:
+{context}
+
+User's previous memories (if any):
+{memory_context}
 """
-
 
 # ── Classification System Prompt ─────────────────────────────────────────────
 
@@ -62,7 +64,7 @@ Keep it warm but short — this is WhatsApp, not email.
 
 NO_CONTEXT_REPLY = (
     "Maaf, saya belum memiliki informasi yang cukup untuk menjawab pertanyaan ini. "
-    "Pertanyaan ini sudah dicatat untuk ditinjau nanti."
+    "Pertanyaan ini sudah dicatat untuk di review."
 )
 
 NO_CONTEXT_REPLY_EN = (
