@@ -101,7 +101,7 @@ class MessageRouter:
             logger.info(f"Bot tagged in group, processing message from {sender_number}")
 
         # Step 3: Route message
-        elif text_stripped.lower() == "/help":
+        if text_stripped.lower() == "/help":
             help_lines = ["📋 *Available Commands*\n"]
             
             help_lines.append("*Memory Commands:*")
