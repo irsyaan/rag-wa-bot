@@ -321,6 +321,17 @@ class RagEngine:
             logger.error(f"Failed to translate rejection message: {e}")
             return "You don't have the permission to do this."
 
+    # Minimal fallback keyword set used ONLY when LLM classification fails
+    _GREETING_KEYWORDS = {
+        "hi", "hii", "hiii", "hello", "helo", "halo", "hai", "hey", "heey",
+        "p", "yo", "oi", "woi", "hei",
+    }
+
+    def _is_greeting_fallback(self, text: str) -> bool:
+        """Simple keyword check used as fallback when LLM classification fails."""
+        words = text.strip().lower().split()
+        return len(words) <= 3 and bool(self._GREETING_KEYWORDS.intersection(words))
+
     def classify_message(self, text: str) -> str:
         """Use the fast model to classify the user's intent."""
         prompt = f"{CLASSIFY_SYSTEM_PROMPT}\n\nMessage: {text}"
@@ -332,17 +343,20 @@ class RagEngine:
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                 },
-                timeout=10,
+                timeout=30,  # increased from 10s
             )
             message = data.get("message", {}).get("content", "").strip().lower()
-            
+
             for category in ["greeting", "question", "command", "chitchat", "unclear"]:
                 if category in message:
                     return category
-                    
+
             return "unclear"
         except Exception as e:
-            logger.error(f"Failed to classify message: {e}")
+            logger.warning(f"LLM classification failed, using keyword fallback: {e}")
+            # Fallback: check simple keywords so greetings still work
+            if self._is_greeting_fallback(text):
+                return "greeting"
             return "unclear"
 
     def generate_greeting(self, text: str, sender_name: str = "User") -> str:
