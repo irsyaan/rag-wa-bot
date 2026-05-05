@@ -14,6 +14,7 @@ Flow:
 """
 
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +23,7 @@ from loguru import logger
 
 from app.config import settings
 from app.mysql_store import mysql_store
+from app.prompts import RAG_SYSTEM_PROMPT
 
 
 @dataclass
@@ -231,25 +233,19 @@ class RagEngine:
 
         return "\n\n---\n\n".join(blocks)
 
-    def _ask_ollama(self, question: str, context: str) -> str:
+    def _ask_ollama(self, question: str, context: str, role: str) -> str:
         """Ask Ollama using retrieved context only."""
-        prompt = f"""
-You are a personal WhatsApp RAG assistant.
-
-1. Answer the user question using ONLY the context below.
-2. CRITICAL: You MUST reply in the EXACT SAME LANGUAGE as the user's Question. If the question is in English, reply in English. If the question is in Indonesian, reply in Indonesian. You must translate the context if it is in a different language.
-3. Keep the answer direct and brief.
-4. Do not show reasoning or thinking.
-5. If the answer is not in the context, reply with a polite message saying you don't have enough information, written in the same language as the Question.
-
-Context:
-{context}
-
-Question:
-{question}
-
-Answer:
-""".strip()
+        current_time = datetime.now().strftime("%H:%M")
+        
+        # Use centralized prompt from prompts.py
+        prompt = RAG_SYSTEM_PROMPT.format(
+            current_time=current_time,
+            role=role,
+            context=context or "No specific context found."
+        )
+        
+        # Add the actual question as the final message
+        prompt += f"\n\nQuestion:\n{question}\n\nAnswer:"
 
         data = self._post_json(
             f"{self.ollama_url}/api/chat",
@@ -308,7 +304,26 @@ Answer:
         except Exception as e:
             logger.warning(f"Could not log failed question: {e}")
 
-    def answer(self, question: str, sender_number: str, chat_jid: str) -> RagResult:
+    def get_rejection_message(self, text: str) -> str:
+        """Use the fast model to generate a translated rejection message."""
+        prompt = f"Translate the exact phrase 'You don't have the permission to do this.' into the language used in the following text. Reply ONLY with the translated phrase, no quotes or extra words.\n\nText: {text}"
+        try:
+            data = self._post_json(
+                f"{self.ollama_url}/api/chat",
+                {
+                    "model": self.fast_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                },
+                timeout=30,
+            )
+            message = data.get("message", {}).get("content", "").strip()
+            return message if message else "You don't have the permission to do this."
+        except Exception as e:
+            logger.error(f"Failed to translate rejection message: {e}")
+            return "You don't have the permission to do this."
+
+    def answer(self, question: str, sender_number: str, chat_jid: str, role: str = "user") -> RagResult:
         """Main RAG answer function."""
         start_time = time.time()
         question = question.strip()
@@ -346,7 +361,7 @@ Answer:
             )
 
             context = self._build_context(sources)
-            answer = self._ask_ollama(question, context)
+            answer = self._ask_ollama(question, context, role)
 
             source_payloads = [
                 {

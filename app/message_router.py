@@ -66,6 +66,8 @@ class MessageRouter:
             user = mysql_store.get_user(sender_number)
             logger.info(f"Auto-registered new user: {sender_number} ({sender_name})")
 
+        role = user.get("role", "user") if user else "user"
+
         if not mysql_store.is_allowed(sender_number):
             logger.info(f"Blocked user attempted message: {sender_number}")
             return
@@ -94,24 +96,60 @@ class MessageRouter:
                 logger.debug(f"Ignoring group message because bot was not mentioned. Mentions: {mentioned_jids}, Resolved: {resolved_mentions}")
                 return
 
-            # If tagged in group, reply personally to sender
-            reply_chat_jid = f"{sender_number}@s.whatsapp.net"
-            logger.info(f"Bot tagged in group, replying personally to {sender_number}")
+            # If tagged in group, reply in the group by default
+            # (unless it's an admin command, which we will handle below)
+            logger.info(f"Bot tagged in group, processing message from {sender_number}")
 
         # Step 3: Route message
-        if admin_commands.is_admin_command(text_stripped):
+        elif text_stripped.lower() == "/help":
+            help_lines = ["📋 *Available Commands*\n"]
+            
+            help_lines.append("*Memory Commands:*")
+            help_lines.append("/memory search <query> — Search memories")
+            
+            if role in ["admin", "owner"]:
+                help_lines.append("/remember <fact> — Save a memory")
+                help_lines.append("/forget <keyword> — Delete a memory")
+                
+                help_lines.append("\n*Admin Commands:*")
+                help_lines.append("/admin listusers — List all registered users")
+                help_lines.append("/admin adduser <number> <name> <role> — Add a user")
+                help_lines.append("/admin setrole <number> <role> — Change user role")
+                help_lines.append("/admin blockuser <number> — Block a user")
+                help_lines.append("/admin unblockuser <number> — Unblock a user")
+                
+            reply = "\n".join(help_lines)
+
+        elif admin_commands.is_admin_command(text_stripped):
             result = admin_commands.execute(text_stripped, sender_number)
-            reply = result.message
+            
+            # If denied due to role, reply in the same chat (group or private) with translated message
+            if not result.success and "admin permissions" in result.message:
+                reply = rag_engine.get_rejection_message(text_stripped)
+                logger.info(f"Admin command denied for {sender_number}, replied with: {reply}")
+            else:
+                # If allowed (or normal error), force private reply to protect sensitive data
+                if is_group:
+                    reply_chat_jid = f"{sender_number}@s.whatsapp.net"
+                    logger.info(f"Admin command used in group, replying personally to {sender_number}")
+                reply = result.message
 
         elif memory_manager.is_memory_command(text_stripped):
-            result = memory_manager.handle_command(text_stripped, sender_number)
-            reply = result.message
+            # Restrict /remember and /forget to admin/owner
+            is_write_cmd = text_stripped.lower().startswith(("/remember", "/forget"))
+            
+            if is_write_cmd and role not in ["admin", "owner"]:
+                reply = rag_engine.get_rejection_message(text_stripped)
+            else:
+                result = memory_manager.handle_command(text_stripped, sender_number)
+                reply = result.message
 
         else:
             rag_result = rag_engine.answer(
                 question=text_stripped,
                 sender_number=sender_number,
                 chat_jid=chat_jid,
+                role=role,
             )
             reply = rag_result.answer
 
