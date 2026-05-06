@@ -751,11 +751,12 @@ class RagEngine:
             return answer
 
         first_line = lines[first_content_idx].strip()
-        is_heading = first_line.endswith(":") and not IP_PATTERN.search(first_line)
+        heading_text = first_line.strip("*_`~ ")
+        is_heading = heading_text.endswith(":") and not IP_PATTERN.search(first_line)
         if not is_heading:
             return answer
 
-        heading_terms = set(re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{1,}", first_line.lower()))
+        heading_terms = set(re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{1,}", heading_text.lower()))
         if target_terms & heading_terms:
             return answer
 
@@ -763,7 +764,9 @@ class RagEngine:
         if not title:
             return answer
 
-        lines[first_content_idx] = f"{title}:"
+        prefix = "*" if first_line.startswith("*") and first_line.endswith("*") else ""
+        suffix = "*" if prefix else ""
+        lines[first_content_idx] = f"{prefix}{title}:{suffix}"
         aligned_answer = "\n".join(lines)
         logger.info(f"Aligned IP answer heading from '{first_line}' to '{title}:'")
         return aligned_answer
