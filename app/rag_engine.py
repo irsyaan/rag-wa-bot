@@ -709,6 +709,60 @@ class RagEngine:
             return True
         return any(phrase in lowered for phrase in ["all ip", "all ips", "semua ip", "list all ip"])
 
+    @staticmethod
+    def _title_from_entity(entity: str) -> str:
+        """Create a compact answer heading from the parsed requested target."""
+        cleaned = re.sub(r"[^a-zA-Z0-9_. -]+", " ", entity or "").strip()
+        if not cleaned:
+            return ""
+
+        words = []
+        for word in cleaned.split():
+            if len(word) <= 3:
+                words.append(word.upper())
+            else:
+                words.append(word[:1].upper() + word[1:])
+        return " ".join(words)
+
+    def _align_ip_answer_heading(self, answer: str, parsed_intent: Optional[ParsedIntent]) -> str:
+        """
+        Keep LLM content but correct misleading infrastructure headings for targeted IP answers.
+
+        Example: user asks FreshFactory, model returns "Zstack e1:" because those rows live
+        under that infra heading. Rewrite only the heading; leave extracted IP rows unchanged.
+        """
+        if not parsed_intent or parsed_intent.intent != "ip_lookup":
+            return answer
+        if self._is_all_ip_request("", parsed_intent):
+            return answer
+        if not parsed_intent.entity or not IP_PATTERN.search(answer or ""):
+            return answer
+
+        target_terms = self._query_terms_from_entity(parsed_intent.entity)
+        if not target_terms:
+            return answer
+
+        lines = answer.splitlines()
+        first_content_idx = next((idx for idx, line in enumerate(lines) if line.strip()), None)
+        if first_content_idx is None:
+            return answer
+
+        first_line = lines[first_content_idx].strip()
+        is_heading = first_line.endswith(":") and not IP_PATTERN.search(first_line)
+        if not is_heading:
+            return answer
+
+        heading_terms = set(re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{1,}", first_line.lower()))
+        if target_terms & heading_terms:
+            return answer
+
+        title = self._title_from_entity(parsed_intent.entity)
+        if not title:
+            return answer
+
+        lines[first_content_idx] = f"{title}:"
+        return "\n".join(lines)
+
     def _format_ip_matches_from_json(
         self,
         raw_text: str,
@@ -1015,6 +1069,7 @@ Context:
                 recent_history=recent_history,
                 parsed_intent=parsed_intent,
             )
+            answer = self._align_ip_answer_heading(answer, parsed_intent)
 
             # Store this exchange in the rolling buffer
             self._history[sender_number].append((question, answer))
