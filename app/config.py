@@ -34,7 +34,6 @@ class Settings(BaseSettings):
     # ── Ollama ───────────────────────────────────────────────────────────
     ollama_base_url: str = Field(default="http://host.docker.internal:11434", alias="OLLAMA_BASE_URL")
     ollama_main_model: str = Field(default="qwen3-8b-rag", alias="OLLAMA_MAIN_MODEL")
-    ollama_fast_model: str = Field(default="qwen3-4b-fast", alias="OLLAMA_FAST_MODEL")
     ollama_embedding_model: str = Field(default="bge-m3", alias="OLLAMA_EMBEDDING_MODEL")
     ollama_think: bool = Field(default=False, alias="OLLAMA_THINK")
 

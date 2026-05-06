@@ -19,7 +19,6 @@ class OllamaClient:
     def __init__(self):
         self.base_url = settings.ollama_base_url.rstrip("/")
         self.main_model = settings.ollama_main_model
-        self.fast_model = settings.ollama_fast_model
         self.embedding_model = settings.ollama_embedding_model
         self.think = settings.ollama_think
         self.timeout = 120  # seconds
@@ -94,16 +93,16 @@ class OllamaClient:
             logger.error(f"Ollama chat failed ({model}): {e}")
             return ""
 
-    # ── Quick Classification ─────────────────────────────────────────────
+    # ── Classification ───────────────────────────────────────────────────
 
     def classify(self, text: str, system_prompt: str) -> str:
         """
-        Quick classification using the fast model (qwen3-4b-fast).
+        Classification using the main model.
         Used for routing/intent detection.
         """
         return self.chat(
             messages=[{"role": "user", "content": text}],
-            model=self.fast_model,
+            model=self.main_model,
             system=system_prompt,
             temperature=0.1,
         )

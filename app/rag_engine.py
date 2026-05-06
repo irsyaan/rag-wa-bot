@@ -61,6 +61,7 @@ IP_LOOKUP_SCORE_THRESHOLD = 0.45
 MIN_RAG_BEST_SCORE = 0.62
 IP_RELEVANCE_STOPWORDS = {
     "ada",
+    "aja",
     "alamat",
     "all",
     "apa",
@@ -96,6 +97,7 @@ IP_RELEVANCE_STOPWORDS = {
     "what",
     "whats",
     "yang",
+    "ya",
 }
 IP_PATTERN = re.compile(
     r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}"
@@ -137,7 +139,6 @@ class RagEngine:
 
         self.embedding_model = settings.ollama_embedding_model
         self.main_model = settings.ollama_main_model
-        self.fast_model = settings.ollama_fast_model
 
         self.max_results = int(settings.rag_max_results)
         self.default_score_threshold = float(settings.rag_score_threshold)
@@ -533,7 +534,7 @@ class RagEngine:
 
     def parse_message_intent(self, text: str) -> ParsedIntent:
         """
-        Use the fast model only as an intent/entity parser.
+        Use the main model only as an intent/entity parser.
 
         The parser must not answer facts. Python still executes retrieval and formatting.
         """
@@ -543,7 +544,8 @@ class RagEngine:
 
         system_prompt = (
             "You classify short WhatsApp messages for an IT assistant. "
-            "Return ONLY compact JSON with keys: intent, entity, suffix, language. "
+            "Return ONLY JSON. No explanation. No steps. No markdown. "
+            "Use keys: intent, entity, suffix, language. "
             "intent must be one of: greeting, ip_lookup, other. "
             "Treat greeting typos and casual variants as greeting, for example "
             "helo, heloo, hy, haii, hallaww, hellaww, hallo, halo, pagi, siang, sore, malam. "
@@ -557,13 +559,14 @@ class RagEngine:
             data = self._post_json(
                 f"{self.ollama_url}/api/chat",
                 {
-                    "model": self.fast_model,
+                    "model": self.main_model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": text},
                     ],
                     "think": False,
                     "stream": False,
+                    "format": "json",
                     "keep_alive": "10m",
                     "options": OLLAMA_PARSE_OPTIONS,
                 },
@@ -761,7 +764,9 @@ class RagEngine:
             return answer
 
         lines[first_content_idx] = f"{title}:"
-        return "\n".join(lines)
+        aligned_answer = "\n".join(lines)
+        logger.info(f"Aligned IP answer heading from '{first_line}' to '{title}:'")
+        return aligned_answer
 
     def _format_ip_matches_from_json(
         self,
@@ -961,13 +966,13 @@ Context:
             )
 
     def get_rejection_message(self, text: str) -> str:
-        """Use the fast model to generate a translated rejection message."""
+        """Use the main model to generate a translated rejection message."""
         prompt = f"Translate the exact phrase 'You don't have the permission to do this.' into the language used in the following text. Reply ONLY with the translated phrase, no quotes or extra words.\n\nText: {text}"
         try:
             data = self._post_json(
                 f"{self.ollama_url}/api/chat",
                 {
-                    "model": self.fast_model,
+                    "model": self.main_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "options": OLLAMA_CHAT_OPTIONS,
