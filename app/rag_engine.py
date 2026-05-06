@@ -369,6 +369,7 @@ class RagEngine:
         role: str,
         sender_name: str = "User",
         recent_history: str = "",
+        parsed_intent: Optional[ParsedIntent] = None,
     ) -> Tuple[str, int]:
         """
         Ask Ollama using retrieved context.
@@ -401,6 +402,17 @@ class RagEngine:
             context=context or "No context available.",
             recent_history=recent_history or "(no recent conversation)",
         )
+
+        parsed_lines = []
+        if parsed_intent:
+            parsed_lines.append(f"Parsed intent: {parsed_intent.intent}")
+            if parsed_intent.entity:
+                parsed_lines.append(f"Parsed requested target/filter: {parsed_intent.entity}")
+            if parsed_intent.suffix:
+                parsed_lines.append(f"Parsed IP suffix filter: {parsed_intent.suffix}")
+
+        if parsed_lines:
+            prompt += "\n\nParsed request:\n" + "\n".join(parsed_lines)
 
         prompt += f"\n\nMessage:\n{question}\n\nAnswer:"
 
@@ -924,6 +936,7 @@ Context:
         chat_jid: str,
         role: str = "user",
         sender_name: str = "User",
+        parsed_intent: Optional[ParsedIntent] = None,
     ) -> RagResult:
         """Main RAG answer function for complex questions after direct handlers."""
         start_time = time.time()
@@ -944,10 +957,33 @@ Context:
 
         try:
             # Step 1: Embed + Search
-            sources, embed_ms, search_ms = self._search_all(question)
+            search_query = question
+            search_threshold = None
+            search_limit = self.max_results
+
+            if parsed_intent and parsed_intent.intent == "ip_lookup":
+                search_threshold = IP_LOOKUP_SCORE_THRESHOLD
+                search_limit = max(self.max_results, 8)
+                search_terms = [question]
+                if parsed_intent.entity and parsed_intent.entity not in question.lower():
+                    search_terms.append(parsed_intent.entity)
+                if parsed_intent.suffix and parsed_intent.suffix not in question:
+                    search_terms.append(parsed_intent.suffix)
+                search_query = " ".join(search_terms)
+
+            sources, embed_ms, search_ms = self._search_all(
+                search_query,
+                threshold=search_threshold,
+                limit=search_limit,
+            )
 
             best_score = sources[0].score if sources else None
-            if not sources or best_score < MIN_RAG_BEST_SCORE:
+            min_best_score = (
+                IP_LOOKUP_SCORE_THRESHOLD
+                if parsed_intent and parsed_intent.intent == "ip_lookup"
+                else MIN_RAG_BEST_SCORE
+            )
+            if not sources or best_score < min_best_score:
                 self._log_failed_question(sender_number, chat_jid, question, best_score)
                 total_ms = int((time.time() - start_time) * 1000)
                 logger.info(
@@ -972,7 +1008,12 @@ Context:
 
             # Step 3: Ask LLM
             answer, llm_ms = self._ask_ollama(
-                question, context, role, sender_name=sender_name, recent_history=recent_history
+                question,
+                context,
+                role,
+                sender_name=sender_name,
+                recent_history=recent_history,
+                parsed_intent=parsed_intent,
             )
 
             # Store this exchange in the rolling buffer

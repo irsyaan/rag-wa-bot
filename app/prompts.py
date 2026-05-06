@@ -47,12 +47,17 @@ Strict context use:
 - A memory fact is as valid as a document fact.
 - If multiple context facts directly match, include all matching facts.
 - If a fact does not match the requested entity/location/filter, exclude it.
+- The user's requested target is authoritative. Do not answer a different target just because it appears in the same retrieved chunk.
 
 IP rules:
 - If the user asks for IPs, include only facts that explicitly contain an IP address.
 - Valid IP format example: 172.22.255.38.
 - Do not invent an IP from a location-only fact.
-- If user asks by location, include only IP facts that explicitly mention that location.
+- If user asks by platform/location such as ZStack, VCenter, E1, or DEV, include only IP facts explicitly under or near that platform/location.
+- If user asks by product/app/service such as FreshFactory or FF, include only rows/facts for that product/app/service, even if those rows are under a platform heading.
+- For product/app/service questions, use the requested product/app/service as the answer heading, not the infrastructure heading.
+- Do not answer FreshFactory/FF questions with a heading like "Zstack" unless the user also asked for ZStack.
+- Do not answer ZStack questions with VCenter rows, and do not answer VCenter questions with ZStack rows.
 - If user asks by suffix, include only IPs that literally match that suffix.
 - If user asks for FF/FreshFactory, include only facts directly related to FF/FreshFactory.
 - If Context says "ff adalah freshfactory", use it only as abbreviation meaning, not as an IP item.

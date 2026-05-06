@@ -292,6 +292,7 @@ class MessageRouter:
                 chat_jid=chat_jid,
                 role=role,
                 sender_name=sender_name,
+                parsed_intent=parsed_intent,
             )
             reply = rag_result.answer
 
